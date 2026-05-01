@@ -788,7 +788,7 @@ function applyStatus(data) {
 // Live metric parsing from log lines
 // (updates cards immediately as lines arrive, independent of status poll)
 // -----------------------------------------------------------------------
-const _HALL_RE     = /\[(\d+)ms\] POL:([+-]) V:([\d.]+) RPM:(\d+)/;
+const _HALL_RE     = /POL:([+-]) V:([\d.]+) RPM:(\d+)/;
 const _RPM_ZERO_RE = /RPM:0/;
 const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
 const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;
@@ -797,12 +797,12 @@ function parseLiveLine(source, line) {
   if (source === 'hall') {
     let m = _HALL_RE.exec(line);
     if (m) {
-      // groups: 1=epoch_ms, 2=polarity, 3=voltage, 4=rpm
-      const rpm = parseInt(m[4]).toLocaleString();
+      // groups: 1=polarity, 2=voltage, 3=rpm
+      const rpm = parseInt(m[3]).toLocaleString();
       _lv('m-rpm',   rpm);
       _lv('bar-rpm', rpm);
-      const v = parseFloat(m[3]);
-      if (m[2] === '+') {
+      const v = parseFloat(m[2]);
+      if (m[1] === '+') {
         _liveHallPosV = v;
         _lv('m-hall-pos-v', v.toFixed(3) + ' V');
         if (_calMode) _lv('m-pitch-pos', _interpolatePitch(v, 'positive'));

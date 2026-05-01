@@ -31,7 +31,7 @@ _ESC_THR_MIN = 48
 _ESC_THR_MAX = 2047
 
 # -----------------------------------------------------------------------
-_HALL_RE      = re.compile(r'\[(\d+)ms\] POL:([+-]) V:([\d.]+) RPM:(\d+)')
+_HALL_RE      = re.compile(r'POL:([+-]) V:([\d.]+) RPM:(\d+)')
 _RPM_ZERO_RE  = re.compile(r'RPM:0')
 
 # Median filter window for hall RPM — filters single-sample spikes
@@ -109,10 +109,10 @@ def _read_loop(source: str, ser: serial.Serial):
             if source == 'hall':
                 m = _HALL_RE.search(line)
                 if m:
-                    polarity = m.group(2)
-                    v = float(m.group(3))
+                    polarity = m.group(1)
+                    v = float(m.group(2))
                     with _lock:
-                        _state['hall']['rpm']      = _rpm_median(int(m.group(4)))
+                        _state['hall']['rpm']      = _rpm_median(int(m.group(3)))
                         _state['hall']['voltage']  = v
                         _state['hall']['polarity'] = polarity
                         if polarity == '+':

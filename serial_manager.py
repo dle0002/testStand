@@ -31,7 +31,7 @@ _ESC_THR_MIN = 48
 _ESC_THR_MAX = 2047
 
 # -----------------------------------------------------------------------
-_HALL_RE      = re.compile(r'T:(\d+)us POL:([+-]) V:([\d.]+) RPM:(\d+)')
+_HALL_RE      = re.compile(r'\[(\d+)ms\] POL:([+-]) V:([\d.]+) RPM:(\d+)')
 _RPM_ZERO_RE  = re.compile(r'RPM:0')
 
 # Median filter window for hall RPM — filters single-sample spikes
@@ -47,9 +47,13 @@ _ESC_RE       = re.compile(
     r'\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh'
 )
 
+_cal_active      = False
+_cal_samples_pos: list = []
+_cal_samples_neg: list = []
+
 _state: dict = {
     'hall': {
-        'rpm': 0, 'voltage': 0.0,
+        'rpm': 0, 'voltage': 0.0, 'pos_voltage': 0.0, 'neg_voltage': 0.0, 'polarity': '+',
         'connected': False, 'port': None,
     },
     'loadcell': {
@@ -105,9 +109,20 @@ def _read_loop(source: str, ser: serial.Serial):
             if source == 'hall':
                 m = _HALL_RE.search(line)
                 if m:
+                    polarity = m.group(2)
+                    v = float(m.group(3))
                     with _lock:
-                        _state['hall']['rpm']     = _rpm_median(int(m.group(4)))
-                        _state['hall']['voltage'] = float(m.group(3))
+                        _state['hall']['rpm']      = _rpm_median(int(m.group(4)))
+                        _state['hall']['voltage']  = v
+                        _state['hall']['polarity'] = polarity
+                        if polarity == '+':
+                            _state['hall']['pos_voltage'] = v
+                            if _cal_active:
+                                _cal_samples_pos.append(v)
+                        else:
+                            _state['hall']['neg_voltage'] = v
+                            if _cal_active:
+                                _cal_samples_neg.append(v)
                 elif _RPM_ZERO_RE.search(line):
                     _rpm_window.clear()
                     with _lock:
@@ -392,6 +407,22 @@ def get_pending_lines() -> list[tuple[str, str]]:
 def get_status() -> dict:
     with _lock:
         return {k: dict(v) for k, v in _state.items()}
+
+
+def start_cal_collection():
+    global _cal_active, _cal_samples_pos, _cal_samples_neg
+    with _lock:
+        _cal_active      = True
+        _cal_samples_pos = []
+        _cal_samples_neg = []
+
+
+def stop_cal_collection() -> tuple:
+    """Returns (pos_samples, neg_samples)."""
+    global _cal_active
+    with _lock:
+        _cal_active = False
+        return list(_cal_samples_pos), list(_cal_samples_neg)
 
 
 def get_log_history(source: str, n: int = 200) -> list[str]:

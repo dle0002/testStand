@@ -291,6 +291,10 @@
           <tr><td class="lbl">Current</td>     <td class="val" id="m-current" style="color:var(--cyan)">—</td></tr>
           <tr><td class="lbl">Temp</td>        <td class="val" id="m-temp"    style="color:var(--orange)">—</td></tr>
           <tr><td class="lbl">mAh</td>         <td class="val" id="m-mah"     style="color:var(--muted)">—</td></tr>
+          <tr><td class="lbl">Hall V (+)</td>   <td class="val" id="m-hall-pos-v" style="color:var(--purple)">—</td></tr>
+          <tr><td class="lbl">Hall V (−)</td>   <td class="val" id="m-hall-neg-v" style="color:var(--purple)">—</td></tr>
+          <tr id="row-pitch-pos" style="display:none"><td class="lbl">Pitch (+)</td><td class="val" id="m-pitch-pos" style="color:var(--cyan)">—°</td></tr>
+          <tr id="row-pitch-neg" style="display:none"><td class="lbl">Pitch (−)</td><td class="val" id="m-pitch-neg" style="color:var(--cyan)">—°</td></tr>
         </table>
       </div>
 
@@ -331,6 +335,49 @@
 
         <button class="btn-record" id="rec-btn" onclick="toggleRecording()">⬤ Start Recording</button>
         <div class="rec-status" id="rec-status"></div>
+      </div>
+
+      <!-- Pitch calibration -->
+      <div class="card">
+        <div class="card-title">Pitch Calibration</div>
+
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+          <span style="font-size:11px;color:var(--muted);flex:1">Calibrated Mode</span>
+          <button id="cal-mode-btn" class="btn btn-set"
+                  style="flex:0;font-size:11px;padding:4px 12px"
+                  onclick="toggleCalMode()">OFF</button>
+        </div>
+
+        <div class="rate-row">
+          <label>Pitch °</label>
+          <input type="number" id="cal-pitch" value="0" min="-90" max="90" step="0.5"
+                 style="width:64px">
+        </div>
+        <div class="rate-row">
+          <label>Duration</label>
+          <input type="number" id="cal-dur" value="3" min="1" max="30" step="1"
+                 style="width:64px">
+          <span class="unit">s</span>
+        </div>
+        <button class="btn btn-set" id="cal-collect-btn" style="width:100%;margin-bottom:6px"
+                onclick="collectCalPoint()">Collect Point</button>
+        <div id="cal-status"
+             style="font-size:11px;color:var(--muted);text-align:center;min-height:16px;margin-bottom:8px"></div>
+
+        <table class="met-table" style="font-size:12px;width:100%">
+          <thead>
+            <tr>
+              <td class="lbl">Pitch °</td>
+              <td class="lbl" style="text-align:right">V (+)</td>
+              <td class="lbl" style="text-align:right">V (−)</td>
+              <td></td>
+            </tr>
+          </thead>
+          <tbody id="cal-tbody"></tbody>
+        </table>
+        <button class="btn btn-disarm"
+                style="width:100%;margin-top:6px;font-size:11px;padding:6px"
+                onclick="clearCalibration()">Clear All</button>
       </div>
 
     </div><!-- /left-panel -->
@@ -703,6 +750,14 @@ function applyStatus(data) {
   setEl('m-current',  current);
   setEl('m-temp',     temp);
   setEl('m-mah',      mah);
+  if (h.pos_voltage != null) {
+    setEl('m-hall-pos-v', h.pos_voltage.toFixed(3) + ' V');
+    if (_calMode) setEl('m-pitch-pos', _interpolatePitch(h.pos_voltage, 'positive'));
+  }
+  if (h.neg_voltage != null) {
+    setEl('m-hall-neg-v', h.neg_voltage.toFixed(3) + ' V');
+    if (_calMode) setEl('m-pitch-neg', _interpolatePitch(h.neg_voltage, 'negative'));
+  }
   setEl('bar-rpm',      rpm);
   setEl('bar-esc-rpm',  escRpm);
   setEl('bar-thrust',   l.weight != null ? l.weight.toFixed(1) : '—');
@@ -733,7 +788,7 @@ function applyStatus(data) {
 // Live metric parsing from log lines
 // (updates cards immediately as lines arrive, independent of status poll)
 // -----------------------------------------------------------------------
-const _HALL_RE     = /T:(\d+)us POL:[+-] V:([\d.]+) RPM:(\d+)/;
+const _HALL_RE     = /\[(\d+)ms\] POL:([+-]) V:([\d.]+) RPM:(\d+)/;
 const _RPM_ZERO_RE = /RPM:0/;
 const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
 const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;
@@ -742,9 +797,20 @@ function parseLiveLine(source, line) {
   if (source === 'hall') {
     let m = _HALL_RE.exec(line);
     if (m) {
-      const rpm = parseInt(m[3]).toLocaleString();  // group 3 in new pattern
+      // groups: 1=epoch_ms, 2=polarity, 3=voltage, 4=rpm
+      const rpm = parseInt(m[4]).toLocaleString();
       _lv('m-rpm',   rpm);
       _lv('bar-rpm', rpm);
+      const v = parseFloat(m[3]);
+      if (m[2] === '+') {
+        _liveHallPosV = v;
+        _lv('m-hall-pos-v', v.toFixed(3) + ' V');
+        if (_calMode) _lv('m-pitch-pos', _interpolatePitch(v, 'positive'));
+      } else {
+        _liveHallNegV = v;
+        _lv('m-hall-neg-v', v.toFixed(3) + ' V');
+        if (_calMode) _lv('m-pitch-neg', _interpolatePitch(v, 'negative'));
+      }
       return;
     }
     if (_RPM_ZERO_RE.test(line)) {
@@ -799,6 +865,9 @@ function connectSSE() {
         document.getElementById('rec-status').textContent = 'No data recorded.';
         document.getElementById('plot-modal').classList.remove('open');
       }
+    } else if (data.type === 'calibration_update') {
+      _calPoints = {positive: {}, negative: {}, ...(data.points || {})};
+      _renderCalTable();
     }
   };
 
@@ -807,6 +876,125 @@ function connectSSE() {
     es.close();
     setTimeout(connectSSE, 3000);
   };
+}
+
+// -----------------------------------------------------------------------
+// Pitch calibration
+// -----------------------------------------------------------------------
+let _calMode      = false;
+let _calPoints    = {positive: {}, negative: {}};
+let _liveHallPosV = null;
+let _liveHallNegV = null;
+
+function _interpolatePitch(voltage, polarity) {
+  const map = _calPoints[polarity] || {};
+  const pts = Object.entries(map)
+    .map(([k, v]) => ({pitch: parseFloat(k), voltage: parseFloat(v)}))
+    .sort((a, b) => a.voltage - b.voltage);
+  if (pts.length === 0) return '—°';
+  if (pts.length === 1) return pts[0].pitch.toFixed(1) + '°';
+  if (voltage <= pts[0].voltage)              return pts[0].pitch.toFixed(1) + '° ←';
+  if (voltage >= pts[pts.length - 1].voltage) return pts[pts.length - 1].pitch.toFixed(1) + '° →';
+  for (let i = 0; i < pts.length - 1; i++) {
+    if (voltage >= pts[i].voltage && voltage <= pts[i + 1].voltage) {
+      const t = (voltage - pts[i].voltage) / (pts[i + 1].voltage - pts[i].voltage);
+      return (pts[i].pitch + t * (pts[i + 1].pitch - pts[i].pitch)).toFixed(1) + '°';
+    }
+  }
+  return '—°';
+}
+
+function toggleCalMode() {
+  _calMode = !_calMode;
+  const btn = document.getElementById('cal-mode-btn');
+  btn.textContent = _calMode ? 'ON' : 'OFF';
+  btn.style.background = _calMode ? 'var(--green)' : 'var(--blue)';
+  ['row-pitch-pos', 'row-pitch-neg'].forEach(id => {
+    document.getElementById(id).style.display = _calMode ? '' : 'none';
+  });
+  if (!_calMode) { setEl('m-pitch-pos', '—°'); setEl('m-pitch-neg', '—°'); }
+}
+
+function _renderCalTable() {
+  const tbody  = document.getElementById('cal-tbody');
+  tbody.innerHTML = '';
+  const posMap = _calPoints.positive || {};
+  const negMap = _calPoints.negative || {};
+  const keys   = [...new Set([...Object.keys(posMap), ...Object.keys(negMap)])]
+    .sort((a, b) => parseFloat(a) - parseFloat(b));
+  for (const key of keys) {
+    const posV = posMap[key] != null ? parseFloat(posMap[key]).toFixed(3) : '—';
+    const negV = negMap[key] != null ? parseFloat(negMap[key]).toFixed(3) : '—';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td class="lbl">${parseFloat(key).toFixed(1)}°</td>` +
+      `<td class="val" style="font-size:12px;text-align:right">${posV}</td>` +
+      `<td class="val" style="font-size:12px;text-align:right">${negV}</td>` +
+      `<td style="text-align:right"><button class="log-clear" onclick="deleteCalPoint(${key})">&#x2715;</button></td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+function collectCalPoint() {
+  const pitch    = parseFloat(document.getElementById('cal-pitch').value) || 0;
+  const duration = parseInt(document.getElementById('cal-dur').value)     || 3;
+  const btn      = document.getElementById('cal-collect-btn');
+  btn.disabled   = true;
+
+  let remaining = duration;
+  document.getElementById('cal-status').textContent = `Collecting… ${remaining}s`;
+  const timer = setInterval(() => {
+    remaining--;
+    document.getElementById('cal-status').textContent =
+      remaining > 0 ? `Collecting… ${remaining}s` : 'Processing…';
+  }, 1000);
+
+  fetch('/api/calibration/point', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({pitch_deg: pitch, duration_s: duration})
+  })
+    .then(r => r.json())
+    .then(d => {
+      clearInterval(timer);
+      if (d.ok) {
+        document.getElementById('cal-status').textContent =
+          `${pitch}°: V(+)=${d.avg_pos_voltage.toFixed(3)} (${d.n_pos}), V(-)=${d.avg_neg_voltage.toFixed(3)} (${d.n_neg})`;
+        const key = parseFloat(pitch).toFixed(2);
+        _calPoints.positive[key] = d.avg_pos_voltage;
+        _calPoints.negative[key] = d.avg_neg_voltage;
+        _renderCalTable();
+      } else {
+        document.getElementById('cal-status').textContent = d.error || 'Failed';
+      }
+    })
+    .catch(() => {
+      clearInterval(timer);
+      document.getElementById('cal-status').textContent = 'Request failed';
+    })
+    .finally(() => { btn.disabled = false; });
+}
+
+function deleteCalPoint(pitch) {
+  fetch('/api/calibration/point', {
+    method:  'DELETE',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({pitch_deg: pitch})
+  })
+    .then(() => {
+      const key = parseFloat(pitch).toFixed(2);
+      delete _calPoints.positive[key];
+      delete _calPoints.negative[key];
+      _renderCalTable();
+    })
+    .catch(console.error);
+}
+
+function clearCalibration() {
+  if (!confirm('Clear all calibration points?')) return;
+  fetch('/api/calibration/clear', {method: 'POST'})
+    .then(() => { _calPoints = {positive: {}, negative: {}}; _renderCalTable(); })
+    .catch(console.error);
 }
 
 // -----------------------------------------------------------------------
@@ -820,6 +1008,15 @@ function connectSSE() {
 });
 
 fetch('/api/status').then(r => r.json()).then(applyStatus).catch(() => {});
+
+fetch('/api/calibration')
+  .then(r => r.json())
+  .then(d => {
+    const p = d.points || {};
+    _calPoints = {positive: p.positive || {}, negative: p.negative || {}};
+    _renderCalTable();
+  })
+  .catch(() => {});
 
 connectSSE();
 </script>

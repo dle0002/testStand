@@ -33,8 +33,29 @@ import serial_manager
 
 app = Flask(__name__)
 
-RECORDINGS_DIR = os.path.join(os.path.dirname(__file__), 'recordings')
+RECORDINGS_DIR   = os.path.join(os.path.dirname(__file__), 'recordings')
+CALIBRATION_PATH = os.path.join(os.path.dirname(__file__), 'calibration.json')
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
+
+
+def _load_calibration() -> dict:
+    try:
+        with open(CALIBRATION_PATH) as f:
+            data = json.load(f)
+        if 'positive' in data and 'negative' in data:
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {'positive': {}, 'negative': {}}
+
+
+def _save_calibration(cal: dict):
+    with open(CALIBRATION_PATH, 'w') as f:
+        json.dump(cal, f, indent=2)
+
+
+_cal_srv_lock = threading.Lock()
+_calibration: dict = _load_calibration()   # {"positive": {pitch_str: V}, "negative": {pitch_str: V}}
 
 # -----------------------------------------------------------------------
 # SSE
@@ -289,6 +310,69 @@ def recording_stop():
 @app.route('/recordings/<filename>')
 def serve_recording(filename: str):
     return send_from_directory(RECORDINGS_DIR, filename)
+
+
+# -----------------------------------------------------------------------
+# Pitch calibration
+# -----------------------------------------------------------------------
+@app.route('/api/calibration')
+def get_calibration():
+    with _cal_srv_lock:
+        return jsonify({'points': dict(_calibration)})
+
+
+@app.route('/api/calibration/point', methods=['POST'])
+def add_cal_point():
+    data     = request.get_json(force=True)
+    pitch    = float(data.get('pitch_deg', 0))
+    duration = max(1.0, min(30.0, float(data.get('duration_s', 3.0))))
+
+    serial_manager.start_cal_collection()
+    time.sleep(duration)
+    pos_samples, neg_samples = serial_manager.stop_cal_collection()
+
+    missing = []
+    if not pos_samples: missing.append('positive peaks')
+    if not neg_samples: missing.append('negative peaks')
+    if missing:
+        return jsonify({'ok': False,
+                        'error': f'no samples for {", ".join(missing)} — is motor spinning?'})
+
+    key     = f'{round(pitch, 2):.2f}'
+    avg_pos = round(sum(pos_samples) / len(pos_samples), 4)
+    avg_neg = round(sum(neg_samples) / len(neg_samples), 4)
+    with _cal_srv_lock:
+        _calibration['positive'][key] = avg_pos
+        _calibration['negative'][key] = avg_neg
+        _save_calibration(_calibration)
+
+    _sse_push({'type': 'calibration_update', 'points': dict(_calibration)})
+    return jsonify({'ok': True, 'pitch_deg': pitch,
+                    'avg_pos_voltage': avg_pos, 'n_pos': len(pos_samples),
+                    'avg_neg_voltage': avg_neg, 'n_neg': len(neg_samples)})
+
+
+@app.route('/api/calibration/point', methods=['DELETE'])
+def del_cal_point():
+    data = request.get_json(force=True)
+    key  = f'{round(float(data.get("pitch_deg", 0)), 2):.2f}'
+    with _cal_srv_lock:
+        removed = bool(_calibration['positive'].pop(key, None) is not None
+                       or _calibration['negative'].pop(key, None) is not None)
+        if removed:
+            _save_calibration(_calibration)
+    _sse_push({'type': 'calibration_update', 'points': dict(_calibration)})
+    return jsonify({'ok': removed})
+
+
+@app.route('/api/calibration/clear', methods=['POST'])
+def clear_calibration():
+    with _cal_srv_lock:
+        _calibration['positive'].clear()
+        _calibration['negative'].clear()
+        _save_calibration(_calibration)
+    _sse_push({'type': 'calibration_update', 'points': {'positive': {}, 'negative': {}}})
+    return jsonify({'ok': True})
 
 
 # -----------------------------------------------------------------------

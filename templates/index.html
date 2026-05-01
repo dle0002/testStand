@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Propeller Teststand</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --text:    #e6edf3;
+    --muted:   #8b949e;
+    --green:   #3fb950;
+    --red:     #f85149;
+    --orange:  #f0883e;
+    --blue:    #58a6ff;
+    --yellow:  #e3b341;
+    --purple:  #bc8cff;
+    --cyan:    #39d4cc;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; overflow: hidden; }
+
+  /* ---- layout -------------------------------------------------------- */
+  .root { display: grid; grid-template-rows: 48px 1fr; height: 100vh; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 16px; background: var(--surface); border-bottom: 1px solid var(--border);
+    gap: 12px; flex-shrink: 0;
+  }
+  header h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; white-space: nowrap; }
+  .badges { display: flex; gap: 8px; align-items: center; }
+  .btn-rescan {
+    padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--muted); font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: color .15s, border-color .15s; white-space: nowrap;
+  }
+  .btn-rescan:hover { color: var(--text); border-color: var(--muted); }
+  .btn-rescan:disabled { opacity: .45; cursor: default; }
+  .btn-rescan.scanning { color: var(--blue); border-color: var(--blue); }
+  .badge {
+    display: flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 12px; font-size: 12px; font-weight: 500;
+    background: var(--bg); border: 1px solid var(--border);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; transition: background .3s; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+  .main { display: grid; grid-template-columns: 270px 1fr; overflow: hidden; }
+
+  /* ---- left panel ---------------------------------------------------- */
+  .left-panel {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 12px; background: var(--surface); border-right: 1px solid var(--border);
+    overflow-y: auto;
+  }
+
+  .card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .card-title { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+
+  /* motor card */
+  .speed-display {
+    font-size: 54px; font-weight: 700; text-align: center;
+    font-variant-numeric: tabular-nums; color: var(--blue); line-height: 1;
+    margin-bottom: 2px;
+  }
+  .speed-pct { font-size: 13px; color: var(--muted); text-align: center; margin-bottom: 12px; }
+
+  input[type=range] {
+    width: 100%; -webkit-appearance: none; appearance: none;
+    height: 34px; border-radius: 17px; outline: none; cursor: pointer;
+    background: linear-gradient(to right, var(--blue) 0%, var(--blue) var(--pct, 0%), var(--border) var(--pct, 0%), var(--border) 100%);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 30px; height: 30px; border-radius: 50%;
+    background: var(--text); box-shadow: 0 2px 8px rgba(0,0,0,.5); cursor: grab;
+  }
+  input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; }
+
+  .speed-row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+  .speed-row input[type=number] {
+    width: 68px; padding: 8px 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 16px; text-align: center;
+  }
+  .btn {
+    flex: 1; padding: 10px; border: none; border-radius: 6px; font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: opacity .15s, background .2s; touch-action: manipulation;
+  }
+  .btn:active { opacity: .7; }
+  .btn-set    { background: var(--blue);   color: #000; }
+  .btn-arm    { background: var(--green);  color: #000; }
+  .btn-disarm { background: var(--orange); color: #000; }
+  .btn-stop   { background: var(--red);    color: #fff; font-size: 15px; padding: 14px; width: 100%; margin-top: 8px; border-radius: 8px; letter-spacing: .05em; }
+
+  .arm-row { display: flex; gap: 8px; margin-top: 8px; }
+  .arm-badge {
+    display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px;
+    border-radius: 10px; font-size: 11px; font-weight: 600; letter-spacing: .06em;
+    background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+    transition: all .3s; margin-bottom: 8px;
+  }
+  .arm-badge.armed { background: rgba(63,185,80,.15); border-color: var(--green); color: var(--green); }
+
+  /* metrics table */
+  .met-table { width: 100%; border-collapse: collapse; }
+  .met-table td { padding: 4px 2px; }
+  .met-table .lbl { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .met-table .val { text-align: right; font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* command input */
+  .cmd-row { display: flex; gap: 5px; }
+  .cmd-row select {
+    padding: 6px 5px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 12px;
+  }
+  .cmd-row input[type=text] {
+    flex: 1; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 12px;
+  }
+  .cmd-row button { padding: 6px 10px; font-size: 12px; }
+
+  /* ---- right panel --------------------------------------------------- */
+  .right-panel { display: flex; flex-direction: column; overflow: hidden; }
+
+  .metrics-row {
+    display: grid; grid-template-columns: repeat(6, 1fr);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .metric-cell {
+    padding: 10px 12px; text-align: center; border-right: 1px solid var(--border);
+  }
+  .metric-cell:last-child { border-right: none; }
+  .metric-cell .label { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 3px; }
+  .metric-cell .val   { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
+  .metric-cell .unit2 { font-size: 11px; color: var(--muted); }
+
+  .logs-grid {
+    flex: 1; display: grid; grid-template-rows: repeat(3, 1fr); overflow: hidden;
+  }
+  .log-panel {
+    display: flex; flex-direction: column; border-bottom: 1px solid var(--border); overflow: hidden;
+  }
+  .log-panel:last-child { border-bottom: none; }
+  .log-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 5px 12px; background: var(--surface); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .log-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; }
+  .log-title.hall     { color: var(--purple); }
+  .log-title.loadcell { color: var(--green);  }
+  .log-title.esc      { color: var(--orange); }
+  .log-clear { font-size: 11px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 2px 6px; }
+  .log-clear:hover { color: var(--text); }
+  .log-body {
+    flex: 1; overflow-y: auto; padding: 5px 12px;
+    font-family: 'Courier New', monospace; font-size: 11px; line-height: 1.55;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-all; }
+  .log-line.hall     { color: #c9b4ff; }
+  .log-line.loadcell { color: #7ee787; }
+  .log-line.esc      { color: #ffa657; }
+  .log-line.system   { color: var(--muted); font-style: italic; }
+
+  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* ---- logging / recording card ------------------------------------- */
+  .rate-row {
+    display: flex; align-items: center; gap: 6px; margin-bottom: 7px;
+  }
+  .rate-row label { font-size: 11px; color: var(--muted); width: 52px; flex-shrink: 0; }
+  .rate-row input[type=number] {
+    width: 64px; padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 13px; text-align: center;
+  }
+  .rate-row .unit { font-size: 11px; color: var(--muted); }
+  .btn-record {
+    width: 100%; padding: 11px; margin-top: 4px; border: none; border-radius: 7px;
+    font-size: 13px; font-weight: 700; letter-spacing: .04em; cursor: pointer;
+    background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+    transition: all .2s; touch-action: manipulation;
+  }
+  .btn-record.recording {
+    background: rgba(248,81,73,.15); border-color: var(--red); color: var(--red);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.65} }
+  .rec-status {
+    margin-top: 6px; font-size: 11px; color: var(--muted); text-align: center;
+    font-variant-numeric: tabular-nums; min-height: 16px;
+  }
+
+  /* ---- plot modal ---------------------------------------------------- */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.75);
+    z-index: 100; align-items: center; justify-content: center; padding: 16px;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal-box {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    max-width: 960px; width: 100%; max-height: 92vh;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .modal-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .modal-header h2 { font-size: 13px; font-weight: 600; }
+  .modal-actions { display: flex; gap: 8px; align-items: center; }
+  .modal-close {
+    background: none; border: none; color: var(--muted); font-size: 18px;
+    cursor: pointer; line-height: 1; padding: 2px 6px;
+  }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { overflow-y: auto; padding: 14px; }
+  .modal-body img { width: 100%; border-radius: 6px; display: block; }
+  .dl-link {
+    display: inline-block; margin-top: 10px; padding: 6px 14px;
+    border: 1px solid var(--border); border-radius: 6px; font-size: 12px;
+    color: var(--blue); text-decoration: none;
+  }
+  .dl-link:hover { border-color: var(--blue); }
+
+  @media (max-width: 720px) {
+    body { overflow: auto; }
+    html, body { height: auto; }
+    .root { grid-template-rows: 48px auto; height: auto; }
+    .main { grid-template-columns: 1fr; height: auto; }
+    .left-panel { border-right: none; border-bottom: 1px solid var(--border); max-height: none; overflow: visible; }
+    .right-panel { height: 80vh; }
+    .metrics-row { grid-template-columns: repeat(3, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="root">
+
+  <!-- ===== HEADER ===================================================== -->
+  <header>
+    <h1>⚙ PROPELLER TESTSTAND</h1>
+    <div class="badges">
+      <div class="badge"><div class="dot" id="dot-hall"></div><span>Hall</span></div>
+      <div class="badge"><div class="dot" id="dot-loadcell"></div><span>Load Cell</span></div>
+      <div class="badge"><div class="dot" id="dot-esc"></div><span>ESC</span></div>
+      <button class="btn-rescan" id="btn-rescan" onclick="rescanPorts()">⟳ Rescan</button>
+      <button class="btn-rescan" onclick="syncDevices()">⏱ Sync</button>
+    </div>
+  </header>
+
+  <div class="main">
+
+    <!-- ===== LEFT PANEL =============================================== -->
+    <div class="left-panel">
+
+      <!-- Motor control -->
+      <div class="card">
+        <div class="card-title">Motor Control</div>
+
+        <div id="arm-badge" class="arm-badge">
+          <div class="dot"></div> DISARMED
+        </div>
+
+        <div class="speed-display" id="disp-speed">0</div>
+        <div class="speed-pct">% throttle</div>
+        <input type="range" id="slider" min="0" max="100" value="0" step="1"
+               oninput="onSlider(this.value)" style="--pct:0%">
+        <div class="speed-row">
+          <input type="number" id="num-speed" min="0" max="100" value="0"
+                 onchange="onNumChange(this.value)">
+          <button class="btn btn-set" onclick="applySpeed()">SET</button>
+        </div>
+        <div class="arm-row">
+          <button class="btn btn-arm"    onclick="armEsc()">ARM</button>
+          <button class="btn btn-disarm" onclick="disarmEsc()">DISARM</button>
+        </div>
+        <button class="btn btn-stop" onclick="emergencyStop()">⬛ EMERGENCY STOP</button>
+      </div>
+
+      <!-- Live metrics -->
+      <div class="card">
+        <div class="card-title">Live Telemetry</div>
+        <table class="met-table">
+          <tr><td class="lbl">RPM (hall)</td>  <td class="val" id="m-rpm"     style="color:var(--purple)">—</td></tr>
+          <tr><td class="lbl">RPM (ESC)</td>   <td class="val" id="m-esc-rpm" style="color:var(--orange)">—</td></tr>
+          <tr><td class="lbl">Thrust</td>      <td class="val" id="m-thrust"  style="color:var(--green)">—</td></tr>
+          <tr><td class="lbl">Voltage</td>     <td class="val" id="m-voltage" style="color:var(--yellow)">—</td></tr>
+          <tr><td class="lbl">Current</td>     <td class="val" id="m-current" style="color:var(--cyan)">—</td></tr>
+          <tr><td class="lbl">Temp</td>        <td class="val" id="m-temp"    style="color:var(--orange)">—</td></tr>
+          <tr><td class="lbl">mAh</td>         <td class="val" id="m-mah"     style="color:var(--muted)">—</td></tr>
+        </table>
+      </div>
+
+      <!-- Raw command -->
+      <div class="card">
+        <div class="card-title">Raw Command</div>
+        <div class="cmd-row">
+          <select id="cmd-target">
+            <option value="esc">ESC</option>
+            <option value="hall">Hall</option>
+            <option value="loadcell">Load Cell</option>
+          </select>
+          <input type="text" id="cmd-input" placeholder="ARM / TARE / d …">
+          <button class="btn btn-set" onclick="sendCmd()" style="flex:0;padding:6px 10px">Send</button>
+        </div>
+        <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.6">
+          ESC: ARM · DISARM · T:&lt;48-2047&gt; · LOG:&lt;hz&gt;<br>
+          Hall: d · SYNC:&lt;ms&gt;<br>
+          Load: TARE · CAL:&lt;g&gt; · LOG:&lt;hz&gt;
+        </div>
+      </div>
+
+      <!-- Logging / recording -->
+      <div class="card">
+        <div class="card-title">Logging &amp; Recording</div>
+
+        <div class="rate-row">
+          <label>Pi rate</label>
+          <input type="number" id="pi-rate" value="10" min="0.1" max="100" step="1">
+          <span class="unit">Hz</span>
+        </div>
+        <div class="rate-row">
+          <label>UI rate</label>
+          <input type="number" id="ui-rate" value="1" min="0.1" max="30" step="0.5">
+          <span class="unit">Hz</span>
+        </div>
+        <button class="btn btn-set" style="width:100%;margin-bottom:8px" onclick="applyRates()">Apply Rates</button>
+
+        <button class="btn-record" id="rec-btn" onclick="toggleRecording()">⬤ Start Recording</button>
+        <div class="rec-status" id="rec-status"></div>
+      </div>
+
+    </div><!-- /left-panel -->
+
+    <!-- ===== RIGHT PANEL ============================================== -->
+    <div class="right-panel">
+
+      <div class="metrics-row">
+        <div class="metric-cell">
+          <div class="label">RPM (Hall)</div>
+          <div class="val" id="bar-rpm" style="color:var(--purple)">—</div>
+        </div>
+        <div class="metric-cell">
+          <div class="label">RPM (ESC)</div>
+          <div class="val" id="bar-esc-rpm" style="color:var(--orange)">—</div>
+        </div>
+        <div class="metric-cell">
+          <div class="label">Thrust</div>
+          <div class="val" id="bar-thrust" style="color:var(--green)">—</div>
+          <div class="unit2">grams</div>
+        </div>
+        <div class="metric-cell">
+          <div class="label">Voltage</div>
+          <div class="val" id="bar-voltage" style="color:var(--yellow);font-size:18px">—</div>
+          <div class="unit2">V</div>
+        </div>
+        <div class="metric-cell">
+          <div class="label">Current</div>
+          <div class="val" id="bar-current" style="color:var(--cyan);font-size:18px">—</div>
+          <div class="unit2">A</div>
+        </div>
+        <div class="metric-cell">
+          <div class="label">Throttle</div>
+          <div class="val" id="bar-throttle" style="color:var(--blue)">0</div>
+          <div class="unit2">%</div>
+        </div>
+      </div>
+
+      <div class="logs-grid">
+        <div class="log-panel">
+          <div class="log-header">
+            <span class="log-title hall">Hall Sensor (RPM)</span>
+            <button class="log-clear" onclick="clearLog('hall')">clear</button>
+          </div>
+          <div class="log-body" id="log-hall"></div>
+        </div>
+        <div class="log-panel">
+          <div class="log-header">
+            <span class="log-title loadcell">Load Cell (Thrust)</span>
+            <button class="log-clear" onclick="clearLog('loadcell')">clear</button>
+          </div>
+          <div class="log-body" id="log-loadcell"></div>
+        </div>
+        <div class="log-panel">
+          <div class="log-header">
+            <span class="log-title esc">ESC / Telemetry</span>
+            <button class="log-clear" onclick="clearLog('esc')">clear</button>
+          </div>
+          <div class="log-body" id="log-esc"></div>
+        </div>
+      </div>
+
+    </div><!-- /right-panel -->
+  </div>
+</div>
+
+<!-- ===== PLOT MODAL ================================================== -->
+<div class="modal-overlay" id="plot-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2 id="plot-title">Recording Plot</h2>
+      <div class="modal-actions">
+        <a class="dl-link" id="dl-csv" href="#" download>⬇ CSV</a>
+        <button class="modal-close" onclick="closePlotModal()">✕</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div id="plot-loading" style="text-align:center;padding:40px;color:var(--muted)">Generating plot…</div>
+      <img id="plot-img" src="" alt="Recording plot" style="display:none">
+    </div>
+  </div>
+</div>
+
+<script>
+// -----------------------------------------------------------------------
+// State
+// -----------------------------------------------------------------------
+const MAX_LINES = 300;
+const autoScroll = { hall: true, loadcell: true, esc: true };
+
+// UI refresh throttle — latestVals stores the most recent parsed value per
+// element id; the uiTicker flushes them to the DOM at uiRateMs intervals.
+let uiRateMs = 1000;
+const latestVals = {};
+function _lv(id, val) { latestVals[id] = val; }
+(function uiTicker() {
+  for (const [id, val] of Object.entries(latestVals)) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = val;
+    delete latestVals[id];
+  }
+  setTimeout(uiTicker, uiRateMs);
+})();
+
+// -----------------------------------------------------------------------
+// Logging rates & recording
+// -----------------------------------------------------------------------
+let _recording = false;
+let _recStartTime = 0;
+let _recTimer = null;
+
+function applyRates() {
+  const piRate = parseFloat(document.getElementById('pi-rate').value) || 10;
+  uiRateMs = Math.round(1000 / (parseFloat(document.getElementById('ui-rate').value) || 1));
+  fetch('/api/logging/rate', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({rate: piRate})
+  }).catch(console.error);
+}
+
+function toggleRecording() {
+  if (_recording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+function startRecording() {
+  fetch('/api/recording/start', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (!d.ok) return;
+      _recording = true;
+      _recStartTime = Date.now();
+      const btn = document.getElementById('rec-btn');
+      btn.classList.add('recording');
+      btn.textContent = '⬛ Stop Recording';
+      // Show elapsed timer
+      _recTimer = setInterval(() => {
+        const s = ((Date.now() - _recStartTime) / 1000).toFixed(1);
+        document.getElementById('rec-status').textContent = `Recording… ${s}s`;
+      }, 200);
+    })
+    .catch(console.error);
+}
+
+function stopRecording() {
+  fetch('/api/recording/stop', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      _recording = false;
+      clearInterval(_recTimer);
+      const btn = document.getElementById('rec-btn');
+      btn.classList.remove('recording');
+      btn.textContent = '⬤ Start Recording';
+      if (d.ok) {
+        document.getElementById('rec-status').textContent =
+          `Saved ${d.points} pts — generating plot…`;
+        // Modal shown when SSE plot_ready arrives
+        openPlotModal(null, null);
+      } else {
+        document.getElementById('rec-status').textContent = d.error || 'No data.';
+      }
+    })
+    .catch(console.error);
+}
+
+// -----------------------------------------------------------------------
+// Plot modal
+// -----------------------------------------------------------------------
+function openPlotModal(plotUrl, csvUrl) {
+  const modal = document.getElementById('plot-modal');
+  modal.classList.add('open');
+  if (plotUrl) {
+    document.getElementById('plot-loading').style.display = 'none';
+    const img = document.getElementById('plot-img');
+    img.src = plotUrl + '?t=' + Date.now();
+    img.style.display = 'block';
+  } else {
+    document.getElementById('plot-loading').style.display = 'block';
+    document.getElementById('plot-img').style.display = 'none';
+  }
+  if (csvUrl) {
+    const dl = document.getElementById('dl-csv');
+    dl.href = csvUrl;
+    dl.download = csvUrl.split('/').pop();
+    dl.style.display = '';
+  }
+}
+
+function closePlotModal() {
+  document.getElementById('plot-modal').classList.remove('open');
+}
+
+// -----------------------------------------------------------------------
+// Motor control
+// -----------------------------------------------------------------------
+function onSlider(v) {
+  v = parseInt(v);
+  document.getElementById('num-speed').value = v;
+  document.getElementById('disp-speed').textContent = v;
+  document.getElementById('slider').style.setProperty('--pct', v + '%');
+  // colour the slider based on throttle level
+  const slider = document.getElementById('slider');
+  const colour = v === 0 ? 'var(--muted)' : v < 30 ? 'var(--green)' : v < 70 ? 'var(--yellow)' : 'var(--red)';
+  slider.style.background = `linear-gradient(to right, ${colour} 0%, ${colour} ${v}%, var(--border) ${v}%, var(--border) 100%)`;
+}
+
+function onNumChange(v) {
+  v = Math.max(0, Math.min(100, parseInt(v) || 0));
+  document.getElementById('slider').value = v;
+  onSlider(v);
+}
+
+function applySpeed() {
+  const speed = parseInt(document.getElementById('slider').value);
+  fetch('/api/motor/speed', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({speed})
+  }).catch(console.error);
+}
+
+function emergencyStop() {
+  document.getElementById('slider').value = 0;
+  onSlider(0);
+  fetch('/api/motor/speed', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({speed: 0})
+  }).catch(console.error);
+}
+
+function armEsc() {
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source: 'esc', command: 'ARM'})
+  }).then(() => appendLog('esc', '> ARM', 'system')).catch(console.error);
+}
+
+function disarmEsc() {
+  document.getElementById('slider').value = 0;
+  onSlider(0);
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source: 'esc', command: 'DISARM'})
+  }).then(() => appendLog('esc', '> DISARM', 'system')).catch(console.error);
+}
+
+// Set on slider release (touch-friendly)
+document.getElementById('slider').addEventListener('change', applySpeed);
+
+// -----------------------------------------------------------------------
+// Port rescan
+// -----------------------------------------------------------------------
+function syncDevices() {
+  fetch('/api/sync', {method: 'POST'})
+    .then(() => appendLog('esc', '[SYNC sent to all devices]', 'system'))
+    .catch(console.error);
+}
+
+function rescanPorts() {
+  const btn = document.getElementById('btn-rescan');
+  btn.disabled = true;
+  btn.classList.add('scanning');
+  btn.textContent = '⟳ Scanning…';
+  fetch('/api/reconnect', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      const connected = Object.entries(d.results || {})
+        .filter(([, ok]) => ok).map(([s]) => s);
+      const failed = Object.entries(d.results || {})
+        .filter(([, ok]) => !ok).map(([s]) => s);
+      if (connected.length)
+        connected.forEach(s => appendLog(s, `[reconnected: ${s}]`, 'system'));
+      if (failed.length)
+        failed.forEach(s => appendLog('esc', `[not found: ${s}]`, 'system'));
+      if (!connected.length && !failed.length)
+        appendLog('esc', '[rescan: all devices already connected]', 'system');
+    })
+    .catch(() => appendLog('esc', '[rescan failed — server error]', 'system'))
+    .finally(() => {
+      btn.disabled = false;
+      btn.classList.remove('scanning');
+      btn.textContent = '⟳ Rescan';
+    });
+}
+
+// -----------------------------------------------------------------------
+// Raw command
+// -----------------------------------------------------------------------
+function sendCmd() {
+  const source  = document.getElementById('cmd-target').value;
+  const command = document.getElementById('cmd-input').value.trim();
+  if (!command) return;
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source, command})
+  }).then(() => {
+    appendLog(source, `> ${command}`, 'system');
+    document.getElementById('cmd-input').value = '';
+  }).catch(console.error);
+}
+
+document.getElementById('cmd-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') sendCmd();
+});
+
+// -----------------------------------------------------------------------
+// Log display
+// -----------------------------------------------------------------------
+function appendLog(source, line, cls) {
+  const body = document.getElementById('log-' + source);
+  if (!body) return;
+  const div = document.createElement('div');
+  div.className = 'log-line ' + (cls || source);
+  div.textContent = line;
+  body.appendChild(div);
+  while (body.childElementCount > MAX_LINES) body.removeChild(body.firstChild);
+  if (autoScroll[source]) body.scrollTop = body.scrollHeight;
+}
+
+function clearLog(source) {
+  document.getElementById('log-' + source).innerHTML = '';
+}
+
+['hall','loadcell','esc'].forEach(src => {
+  const body = document.getElementById('log-' + src);
+  body.addEventListener('scroll', () => {
+    autoScroll[src] = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+  });
+});
+
+// -----------------------------------------------------------------------
+// Status updates
+// -----------------------------------------------------------------------
+function setEl(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+function applyStatus(data) {
+  ['hall','loadcell','esc'].forEach(src => {
+    const connected = data[src]?.connected;
+    document.getElementById('dot-' + src)?.classList.toggle('on', !!connected);
+  });
+
+  const h = data.hall      || {};
+  const l = data.loadcell  || {};
+  const e = data.esc       || {};
+
+  const rpm      = h.rpm      != null ? h.rpm.toLocaleString()       : '—';
+  const escRpm   = e.rpm      != null ? e.rpm.toLocaleString()       : '—';
+  const thrust   = l.weight   != null ? l.weight.toFixed(1) + ' g'  : '—';
+  const voltage  = e.voltage  != null ? e.voltage.toFixed(2) + ' V' : '—';
+  const current  = e.current  != null ? e.current.toFixed(2) + ' A' : '—';
+  const temp     = e.temp     != null ? e.temp + ' °C'               : '—';
+  const mah      = e.mah      != null ? e.mah + ' mAh'               : '—';
+  const throttle = e.throttle_pct ?? 0;
+
+  setEl('m-rpm',      rpm);
+  setEl('m-esc-rpm',  escRpm);
+  setEl('m-thrust',   thrust);
+  setEl('m-voltage',  voltage);
+  setEl('m-current',  current);
+  setEl('m-temp',     temp);
+  setEl('m-mah',      mah);
+  setEl('bar-rpm',      rpm);
+  setEl('bar-esc-rpm',  escRpm);
+  setEl('bar-thrust',   l.weight != null ? l.weight.toFixed(1) : '—');
+  setEl('bar-voltage',  e.voltage != null ? e.voltage.toFixed(2) : '—');
+  setEl('bar-current',  e.current != null ? e.current.toFixed(2) : '—');
+  setEl('bar-throttle', throttle);
+
+  // Arm badge
+  const badge = document.getElementById('arm-badge');
+  if (badge) {
+    badge.classList.toggle('armed', !!e.armed);
+    badge.innerHTML = e.armed
+      ? '<div class="dot on"></div> ARMED'
+      : '<div class="dot"></div> DISARMED';
+  }
+
+  // Sync slider with confirmed server throttle (avoids fighting user input)
+  const sliderEl = document.getElementById('slider');
+  if (sliderEl && !sliderEl.matches(':active')) {
+    const t = throttle;
+    sliderEl.value = t;
+    onSlider(t);
+    document.getElementById('disp-speed').textContent = t;
+  }
+}
+
+// -----------------------------------------------------------------------
+// Live metric parsing from log lines
+// (updates cards immediately as lines arrive, independent of status poll)
+// -----------------------------------------------------------------------
+const _HALL_RE     = /T:(\d+)us POL:[+-] V:([\d.]+) RPM:(\d+)/;
+const _RPM_ZERO_RE = /RPM:0/;
+const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
+const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;
+
+function parseLiveLine(source, line) {
+  if (source === 'hall') {
+    let m = _HALL_RE.exec(line);
+    if (m) {
+      const rpm = parseInt(m[3]).toLocaleString();  // group 3 in new pattern
+      _lv('m-rpm',   rpm);
+      _lv('bar-rpm', rpm);
+      return;
+    }
+    if (_RPM_ZERO_RE.test(line)) {
+      _lv('m-rpm',   '0');
+      _lv('bar-rpm', '0');
+    }
+  } else if (source === 'loadcell') {
+    const m = _LC_RE.exec(line);
+    if (m) {
+      const w = parseFloat(m[2]).toFixed(1);
+      _lv('m-thrust',   w + ' g');
+      _lv('bar-thrust', w);
+    }
+  } else if (source === 'esc') {
+    const m = _ESC_RE.exec(line);
+    if (m) {
+      _lv('m-esc-rpm',   parseInt(m[3]).toLocaleString());
+      _lv('bar-esc-rpm', parseInt(m[3]).toLocaleString());
+      _lv('m-voltage',   parseFloat(m[4]).toFixed(2) + ' V');
+      _lv('bar-voltage', parseFloat(m[4]).toFixed(2));
+      _lv('m-current',   parseFloat(m[5]).toFixed(2) + ' A');
+      _lv('bar-current', parseFloat(m[5]).toFixed(2));
+      _lv('m-temp',      m[6] + ' °C');
+      _lv('m-mah',       m[7] + ' mAh');
+    }
+  }
+}
+
+// -----------------------------------------------------------------------
+// SSE connection
+// -----------------------------------------------------------------------
+function connectSSE() {
+  const es = new EventSource('/events');
+
+  es.onmessage = function(e) {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.type === 'log') {
+      appendLog(data.source, data.line);
+      parseLiveLine(data.source, data.line);
+    } else if (data.type === 'status') {
+      applyStatus(data);
+    } else if (data.type === 'plot_ready') {
+      const title = document.getElementById('plot-title');
+      if (title) title.textContent =
+        `Recording — ${data.points} pts, ${data.duration}s`;
+      document.getElementById('rec-status').textContent =
+        `Saved ${data.points} pts (${data.duration}s)`;
+      openPlotModal(data.plot, data.csv);
+    } else if (data.type === 'recording') {
+      if (data.state === 'stopped' && !data.points) {
+        document.getElementById('rec-status').textContent = 'No data recorded.';
+        document.getElementById('plot-modal').classList.remove('open');
+      }
+    }
+  };
+
+  es.onerror = function() {
+    appendLog('esc', '[SSE disconnected — reconnecting in 3 s…]', 'system');
+    es.close();
+    setTimeout(connectSSE, 3000);
+  };
+}
+
+// -----------------------------------------------------------------------
+// Init
+// -----------------------------------------------------------------------
+['hall','loadcell','esc'].forEach(src => {
+  fetch('/api/logs/' + src)
+    .then(r => r.json())
+    .then(d => (d.lines || []).forEach(l => appendLog(src, l)))
+    .catch(() => {});
+});
+
+fetch('/api/status').then(r => r.json()).then(applyStatus).catch(() => {});
+
+connectSSE();
+</script>
+</body>
+</html>

@@ -13,18 +13,22 @@ PASS="teststand123"
 CON_NAME="teststand-ap"
 IFACE="wlan0"
 
+NMCLI="nmcli"
+# When run as non-root, prefix nmcli with sudo
+[ "$(id -u)" -ne 0 ] && NMCLI="sudo nmcli"
+
 check_connectivity() {
   # Returns 0 if we have a WiFi connection with internet, 1 otherwise
-  nmcli -t -f TYPE,STATE device | grep -q "^wifi:connected" && return 0
+  $NMCLI -t -f TYPE,STATE device | grep -q "^wifi:connected" && return 0
   return 1
 }
 
 start_ap() {
   # Remove stale profile from a previous run (survives reboots, blocks re-creation)
-  nmcli connection delete "$CON_NAME" 2>/dev/null || true
+  $NMCLI connection delete "$CON_NAME" 2>/dev/null || true
 
   echo "Starting hotspot: SSID=$SSID on $IFACE"
-  nmcli device wifi hotspot \
+  $NMCLI device wifi hotspot \
     ifname "$IFACE" \
     ssid   "$SSID" \
     password "$PASS" \
@@ -44,8 +48,8 @@ start_ap() {
 }
 
 stop_ap() {
-  nmcli connection down "$CON_NAME" 2>/dev/null
-  nmcli connection delete "$CON_NAME" 2>/dev/null
+  $NMCLI connection down "$CON_NAME" 2>/dev/null
+  $NMCLI connection delete "$CON_NAME" 2>/dev/null
   echo "Hotspot stopped."
 }
 

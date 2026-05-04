@@ -5,6 +5,7 @@ Wants=NetworkManager.service
 
 [Service]
 Type=simple
+User=root
 WorkingDirectory=/home/pi/testStand
 ExecStart=/bin/bash /home/pi/testStand/start.sh
 Restart=on-failure

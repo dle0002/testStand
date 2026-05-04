@@ -383,12 +383,32 @@ def get_calibration():
 
 @app.route('/api/calibration/point', methods=['POST'])
 def add_cal_point():
-    data     = request.get_json(force=True)
-    pitch    = float(data.get('pitch_deg', 0))
-    duration = max(1.0, min(30.0, float(data.get('duration_s', 3.0))))
+    data  = request.get_json(force=True)
+    pitch = float(data.get('pitch_deg', 0))
+
+    THR_LOW       = 5      # % throttle at sweep start/end
+    THR_HIGH      = 25     # % throttle at sweep peak
+    RAMP_DURATION = 10.0   # seconds per ramp leg
+    STEP_INTERVAL = 0.2    # seconds between throttle steps
+    steps = int(RAMP_DURATION / STEP_INTERVAL)
 
     serial_manager.start_cal_collection()
-    time.sleep(duration)
+
+    # Ramp up: THR_LOW → THR_HIGH over RAMP_DURATION seconds
+    for i in range(steps + 1):
+        thr = round(THR_LOW + (THR_HIGH - THR_LOW) * i / steps)
+        serial_manager.set_motor_speed(thr)
+        time.sleep(STEP_INTERVAL)
+
+    # Ramp down: THR_HIGH → THR_LOW over RAMP_DURATION seconds
+    for i in range(steps + 1):
+        thr = round(THR_HIGH - (THR_HIGH - THR_LOW) * i / steps)
+        serial_manager.set_motor_speed(thr)
+        time.sleep(STEP_INTERVAL)
+
+    # Stop motor
+    serial_manager.set_motor_speed(0)
+
     pos_samples, neg_samples = serial_manager.stop_cal_collection()
 
     missing = []
@@ -396,7 +416,7 @@ def add_cal_point():
     if not neg_samples: missing.append('negative peaks')
     if missing:
         return jsonify({'ok': False,
-                        'error': f'no samples for {", ".join(missing)} — is motor spinning?'})
+                        'error': f'no samples for {", ".join(missing)} — check hall sensor'})
 
     key     = f'{round(pitch, 2):.2f}'
     avg_pos = round(sum(pos_samples) / len(pos_samples), 4)

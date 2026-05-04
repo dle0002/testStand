@@ -353,14 +353,24 @@
           <input type="number" id="cal-pitch" value="0" min="-90" max="90" step="0.5"
                  style="width:64px">
         </div>
-        <div class="rate-row">
-          <label>Duration</label>
-          <input type="number" id="cal-dur" value="3" min="1" max="30" step="1"
-                 style="width:64px">
-          <span class="unit">s</span>
-        </div>
         <button class="btn btn-set" id="cal-collect-btn" style="width:100%;margin-bottom:6px"
                 onclick="collectCalPoint()">Collect Point</button>
+
+        <!-- Inline confirmation -->
+        <div id="cal-confirm" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:6px;font-size:12px">
+          <div style="color:var(--text);margin-bottom:6px">
+            Collect point at <strong id="cal-confirm-pitch"></strong>°?
+          </div>
+          <div style="color:#f85149;margin-bottom:10px">
+            ⚠ Ensure propeller area is clear!<br>
+            Motor will ramp 5 → 25 → 5 % over 20 s.
+          </div>
+          <div style="display:flex;gap:6px">
+            <button class="btn btn-arm"    style="flex:1;font-size:11px;padding:6px" onclick="confirmCalPoint()">Confirm</button>
+            <button class="btn btn-disarm" style="flex:1;font-size:11px;padding:6px" onclick="cancelCalPoint()">Cancel</button>
+          </div>
+        </div>
+
         <div id="cal-status"
              style="font-size:11px;color:var(--muted);text-align:center;min-height:16px;margin-bottom:8px"></div>
 
@@ -938,43 +948,59 @@ function _renderCalTable() {
 }
 
 function collectCalPoint() {
-  const pitch    = parseFloat(document.getElementById('cal-pitch').value) || 0;
-  const duration = parseInt(document.getElementById('cal-dur').value)     || 3;
-  const btn      = document.getElementById('cal-collect-btn');
-  btn.disabled   = true;
+  const pitch = parseFloat(document.getElementById('cal-pitch').value) || 0;
+  document.getElementById('cal-confirm-pitch').textContent = pitch.toFixed(1);
+  document.getElementById('cal-confirm').style.display = '';
+  document.getElementById('cal-collect-btn').style.display = 'none';
+  document.getElementById('cal-status').textContent = '';
+}
 
-  let remaining = duration;
-  document.getElementById('cal-status').textContent = `Collecting… ${remaining}s`;
+function cancelCalPoint() {
+  document.getElementById('cal-confirm').style.display = 'none';
+  document.getElementById('cal-collect-btn').style.display = '';
+}
+
+function confirmCalPoint() {
+  const pitch  = parseFloat(document.getElementById('cal-pitch').value) || 0;
+  const btn    = document.getElementById('cal-collect-btn');
+  const status = document.getElementById('cal-status');
+  document.getElementById('cal-confirm').style.display = 'none';
+
+  // Countdown: 10s ramp up + 10s ramp down
+  let elapsed = 0;
+  status.textContent = 'Ramping up… 10s';
   const timer = setInterval(() => {
-    remaining--;
-    document.getElementById('cal-status').textContent =
-      remaining > 0 ? `Collecting… ${remaining}s` : 'Processing…';
+    elapsed++;
+    if (elapsed < 10)       status.textContent = `Ramping up… ${10 - elapsed}s`;
+    else if (elapsed === 10) status.textContent = 'Ramping down… 10s';
+    else if (elapsed < 20)  status.textContent = `Ramping down… ${20 - elapsed}s`;
+    else                    status.textContent = 'Processing…';
   }, 1000);
 
   fetch('/api/calibration/point', {
     method:  'POST',
     headers: {'Content-Type': 'application/json'},
-    body:    JSON.stringify({pitch_deg: pitch, duration_s: duration})
+    body:    JSON.stringify({pitch_deg: pitch})
   })
     .then(r => r.json())
     .then(d => {
       clearInterval(timer);
       if (d.ok) {
-        document.getElementById('cal-status').textContent =
-          `${pitch}°: V(+)=${d.avg_pos_voltage.toFixed(3)} (${d.n_pos}), V(-)=${d.avg_neg_voltage.toFixed(3)} (${d.n_neg})`;
+        status.textContent =
+          `${pitch}°: V(+)=${d.avg_pos_voltage.toFixed(3)} (${d.n_pos} pts), V(−)=${d.avg_neg_voltage.toFixed(3)} (${d.n_neg} pts)`;
         const key = parseFloat(pitch).toFixed(2);
         _calPoints.positive[key] = d.avg_pos_voltage;
         _calPoints.negative[key] = d.avg_neg_voltage;
         _renderCalTable();
       } else {
-        document.getElementById('cal-status').textContent = d.error || 'Failed';
+        status.textContent = d.error || 'Failed';
       }
     })
     .catch(() => {
       clearInterval(timer);
-      document.getElementById('cal-status').textContent = 'Request failed';
+      status.textContent = 'Request failed';
     })
-    .finally(() => { btn.disabled = false; });
+    .finally(() => { btn.style.display = ''; });
 }
 
 function deleteCalPoint(pitch) {

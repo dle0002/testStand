@@ -38,6 +38,27 @@ CALIBRATION_PATH = os.path.join(os.path.dirname(__file__), 'calibration.json')
 os.makedirs(RECORDINGS_DIR, exist_ok=True)
 
 
+def _interpolate_pitch(voltage: float, polarity: str, calibration: dict):
+    """Return interpolated pitch (float) or None if no calibration points."""
+    pts_map = calibration.get(polarity, {})
+    if not pts_map:
+        return None
+    pts = sorted((float(v), float(k)) for k, v in pts_map.items())
+    if len(pts) == 1:
+        return pts[0][1]
+    if voltage <= pts[0][0]:
+        return pts[0][1]
+    if voltage >= pts[-1][0]:
+        return pts[-1][1]
+    for i in range(len(pts) - 1):
+        v0, p0 = pts[i]
+        v1, p1 = pts[i + 1]
+        if v0 <= voltage <= v1:
+            t = (voltage - v0) / (v1 - v0)
+            return p0 + t * (p1 - p0)
+    return None
+
+
 def _load_calibration() -> dict:
     try:
         with open(CALIBRATION_PATH) as f:
@@ -112,14 +133,24 @@ _rec_start  = 0.0
 
 
 def _generate_plot(data: list[dict], path: str):
-    times    = [d['time_s']    for d in data]
-    rpm_hall = [d['rpm_hall']  for d in data]
-    rpm_esc  = [d['esc_rpm']   for d in data]
-    thrust   = [d['weight_g']  for d in data]
-    voltage  = [d['voltage_v'] for d in data]
-    current  = [d['current_a'] for d in data]
-    temp     = [d['temp_c']    for d in data]
+    times    = [d['time_s']       for d in data]
+    rpm_hall = [d['rpm_hall']     for d in data]
+    rpm_esc  = [d['esc_rpm']      for d in data]
+    thrust   = [d['weight_g']     for d in data]
+    voltage  = [d['voltage_v']    for d in data]
+    current  = [d['current_a']    for d in data]
+    temp     = [d['temp_c']       for d in data]
     throttle = [d['throttle_pct'] for d in data]
+    pos_v    = [d.get('pos_voltage', 0.0) for d in data]
+    neg_v    = [d.get('neg_voltage', 0.0) for d in data]
+
+    def _to_float(v):
+        try:    return float(v)
+        except: return None
+
+    pitch_pos_raw = [_to_float(d.get('pitch_pos')) for d in data]
+    pitch_neg_raw = [_to_float(d.get('pitch_neg')) for d in data]
+    has_pitch = any(v is not None for v in pitch_pos_raw + pitch_neg_raw)
 
     BG    = '#0d1117'
     SURF  = '#161b22'
@@ -127,8 +158,8 @@ def _generate_plot(data: list[dict], path: str):
     TEXT  = '#e6edf3'
     MUTED = '#8b949e'
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 10), sharex=True,
-                             gridspec_kw={'hspace': 0.08})
+    fig, axes = plt.subplots(6, 1, figsize=(14, 16), sharex=True,
+                             gridspec_kw={'hspace': 0.10})
     fig.patch.set_facecolor(BG)
 
     def _style(ax):
@@ -181,6 +212,35 @@ def _generate_plot(data: list[dict], path: str):
     _style(ax)
     ax.plot(times, temp, color='#f85149', linewidth=1.5)
     ax.set_ylabel('Temp (°C)')
+
+    # ── Hall raw voltage (pos + neg peaks) ──
+    ax = axes[4]
+    _style(ax)
+    ax.plot(times, pos_v, color='#79c0ff', linewidth=1.2, label='V peak (+)')
+    ax.plot(times, neg_v, color='#ff7b72', linewidth=1.2, label='V peak (−)')
+    ax.set_ylabel('Hall V (V)')
+    ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
+              edgecolor=BORDER, framealpha=0.8)
+
+    # ── Pitch angle (pos + neg peaks) ──
+    ax = axes[5]
+    _style(ax)
+    if has_pitch:
+        t_pp = [t for t, v in zip(times, pitch_pos_raw) if v is not None]
+        v_pp = [v for v in pitch_pos_raw if v is not None]
+        t_pn = [t for t, v in zip(times, pitch_neg_raw) if v is not None]
+        v_pn = [v for v in pitch_neg_raw if v is not None]
+        if t_pp:
+            ax.plot(t_pp, v_pp, color='#79c0ff', linewidth=1.2, label='Pitch (+)')
+        if t_pn:
+            ax.plot(t_pn, v_pn, color='#ff7b72', linewidth=1.2, label='Pitch (−)')
+        ax.axhline(0, color=MUTED, linewidth=0.5, linestyle='--')
+        ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
+                  edgecolor=BORDER, framealpha=0.8)
+    else:
+        ax.text(0.5, 0.5, 'No pitch calibration', transform=ax.transAxes,
+                ha='center', va='center', color=MUTED, fontsize=10)
+    ax.set_ylabel('Pitch (°)')
     ax.set_xlabel('Time (s)', color=TEXT, fontsize=10)
     ax.tick_params(axis='x', colors=MUTED)
 
@@ -260,7 +320,7 @@ def recording_start():
         _recording = True
         _rec_data  = []
         _rec_start = time.time()
-    _sse_push({'type': 'recording', 'state': 'started'})
+    _sse_push({'type': 'recording', 'state': 'started', 'cal_mode': True})
     return jsonify({'ok': True})
 
 
@@ -402,17 +462,27 @@ def _recorder():
             start  = _rec_start
 
         if active:
-            st = serial_manager.get_status()
+            st  = serial_manager.get_status()
+            pos_v = st['hall'].get('pos_voltage', 0.0)
+            neg_v = st['hall'].get('neg_voltage', 0.0)
+            with _cal_srv_lock:
+                cal = dict(_calibration)
+            pitch_pos = _interpolate_pitch(pos_v, 'positive', cal)
+            pitch_neg = _interpolate_pitch(neg_v, 'negative', cal)
             _rec_data.append({
-                'time_s':      round(time.time() - start, 4),
+                'time_s':       round(time.time() - start, 4),
                 'throttle_pct': st['esc'].get('throttle_pct', 0),
-                'rpm_hall':    st['hall'].get('rpm', 0),
-                'weight_g':    st['loadcell'].get('weight', 0.0),
-                'esc_rpm':     st['esc'].get('rpm', 0),
-                'voltage_v':   st['esc'].get('voltage', 0.0),
-                'current_a':   st['esc'].get('current', 0.0),
-                'temp_c':      st['esc'].get('temp', 0),
-                'mah':         st['esc'].get('mah', 0),
+                'rpm_hall':     st['hall'].get('rpm', 0),
+                'weight_g':     st['loadcell'].get('weight', 0.0),
+                'esc_rpm':      st['esc'].get('rpm', 0),
+                'voltage_v':    st['esc'].get('voltage', 0.0),
+                'current_a':    st['esc'].get('current', 0.0),
+                'temp_c':       st['esc'].get('temp', 0),
+                'mah':          st['esc'].get('mah', 0),
+                'pos_voltage':  round(pos_v, 4),
+                'neg_voltage':  round(neg_v, 4),
+                'pitch_pos':    round(pitch_pos, 2) if pitch_pos is not None else '',
+                'pitch_neg':    round(pitch_neg, 2) if pitch_neg is not None else '',
             })
             time.sleep(1.0 / rate)
         else:

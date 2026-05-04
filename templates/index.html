@@ -861,7 +861,9 @@ function connectSSE() {
         `Saved ${data.points} pts (${data.duration}s)`;
       openPlotModal(data.plot, data.csv);
     } else if (data.type === 'recording') {
-      if (data.state === 'stopped' && !data.points) {
+      if (data.state === 'started' && data.cal_mode && !_calMode) {
+        toggleCalMode();
+      } else if (data.state === 'stopped' && !data.points) {
         document.getElementById('rec-status').textContent = 'No data recorded.';
         document.getElementById('plot-modal').classList.remove('open');
       }

@@ -20,6 +20,9 @@ check_connectivity() {
 }
 
 start_ap() {
+  # Remove stale profile from a previous run (survives reboots, blocks re-creation)
+  nmcli connection delete "$CON_NAME" 2>/dev/null || true
+
   echo "Starting hotspot: SSID=$SSID on $IFACE"
   nmcli device wifi hotspot \
     ifname "$IFACE" \

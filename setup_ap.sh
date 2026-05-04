@@ -28,7 +28,7 @@ start_ap() {
     ifname "$IFACE" \
     ssid   "$SSID" \
     password "$PASS" \
-    con-name "$CON_NAME" 2>/dev/null
+    con-name "$CON_NAME"
 
   if [ $? -eq 0 ]; then
     PI_IP=$(ip -4 addr show "$IFACE" | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)

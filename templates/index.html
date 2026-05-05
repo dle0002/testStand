@@ -92,6 +92,17 @@
   .btn-set    { background: var(--blue);   color: #000; }
   .btn-arm    { background: var(--green);  color: #000; }
   .btn-disarm { background: var(--orange); color: #000; }
+  .btn-slowdown {
+    background: var(--surface); color: var(--orange); border: 1px solid var(--orange);
+    font-size: 13px; font-weight: 700; padding: 11px; width: 100%; margin-top: 8px;
+    border-radius: 8px; letter-spacing: .04em; cursor: pointer;
+    transition: background .2s, color .2s; touch-action: manipulation;
+  }
+  .btn-slowdown:active { opacity: .7; }
+  .btn-slowdown.active {
+    background: rgba(240,136,62,.15); color: var(--orange); border-color: var(--orange);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
   .btn-stop   { background: var(--red);    color: #fff; font-size: 15px; padding: 14px; width: 100%; margin-top: 8px; border-radius: 8px; letter-spacing: .05em; }
 
   .arm-row { display: flex; gap: 8px; margin-top: 8px; }
@@ -321,6 +332,11 @@
           <button class="btn btn-arm"    onclick="armEsc()">ARM</button>
           <button class="btn btn-disarm" onclick="disarmEsc()">DISARM</button>
         </div>
+        <button class="btn btn-slowdown" id="btn-slowdown" onclick="slowdown()">
+          ▼ SLOW STOP
+        </button>
+        <div id="slowdown-status"
+             style="font-size:11px;color:var(--muted);text-align:center;min-height:16px;margin-top:4px"></div>
         <button class="btn btn-stop" onclick="emergencyStop()">⬛ EMERGENCY STOP</button>
       </div>
 
@@ -686,6 +702,7 @@ function applySpeed() {
 }
 
 function emergencyStop() {
+  _cancelSlowdown();
   if (_rpmMode) _disableRpmCtrl('STOPPED — re-SET to resume');
   document.getElementById('slider').value = 0;
   onSlider(0);
@@ -694,6 +711,44 @@ function emergencyStop() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({speed: 0})
   }).catch(console.error);
+}
+
+let _slowdownActive = false;
+
+function _cancelSlowdown() {
+  if (!_slowdownActive) return;
+  _slowdownActive = false;
+  fetch('/api/motor/slowdown', {method:'POST'}).catch(console.error);
+  _setSlowdownUI(false, '');
+}
+
+function _setSlowdownUI(active, msg) {
+  const btn = document.getElementById('btn-slowdown');
+  const st  = document.getElementById('slowdown-status');
+  if (!btn) return;
+  _slowdownActive = active;
+  btn.classList.toggle('active', active);
+  btn.textContent = active ? '◼ CANCEL SLOW STOP' : '▼ SLOW STOP';
+  if (st) st.textContent = msg;
+}
+
+function slowdown() {
+  if (_slowdownActive) {
+    _cancelSlowdown();
+    return;
+  }
+  if (_rpmMode) _disableRpmCtrl('Slow stop initiated');
+  fetch('/api/motor/slowdown', {method:'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok && d.state === 'started') {
+        _setSlowdownUI(true, 'Decelerating to 500 RPM…');
+      } else {
+        const st = document.getElementById('slowdown-status');
+        if (st) st.textContent = d.error || 'Motor not armed.';
+      }
+    })
+    .catch(console.error);
 }
 
 function armEsc() {
@@ -705,6 +760,7 @@ function armEsc() {
 }
 
 function disarmEsc() {
+  _cancelSlowdown();
   if (_rpmMode) _disableRpmCtrl('Disarmed');
   document.getElementById('slider').value = 0;
   onSlider(0);
@@ -1175,6 +1231,22 @@ function connectSSE() {
     } else if (data.type === 'calibration_update') {
       _calPoints = {positive: {}, negative: {}, ...(data.points || {})};
       _renderCalTable();
+    } else if (data.type === 'slowdown') {
+      if (data.state === 'running') {
+        const rpm = data.rpm  ? `${data.rpm} RPM` : '—';
+        const thr = data.throttle != null ? ` · DS ${data.throttle}` : '';
+        _setSlowdownUI(true, `${rpm}${thr}`);
+      } else if (data.state === 'done') {
+        _setSlowdownUI(false, 'Disarmed ✓');
+        document.getElementById('slider').value = 0;
+        onSlider(0);
+        setTimeout(() => {
+          const st = document.getElementById('slowdown-status');
+          if (st) st.textContent = '';
+        }, 3000);
+      } else if (data.state === 'cancelled') {
+        _setSlowdownUI(false, '');
+      }
     } else if (data.type === 'rpm_ctrl_error') {
       appendLog('esc', `[RPM ctrl: ${data.error}]`, 'system');
       const statusEl = document.getElementById('rpm-status');

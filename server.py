@@ -140,6 +140,15 @@ _rpm_enabled     = False
 _rpm_target      = 0       # target RPM (0 = disabled)
 _rpm_current_thr = 0.0     # float DShot value tracked by controller
 
+# -----------------------------------------------------------------------
+# Controlled slowdown
+# -----------------------------------------------------------------------
+_slowdown_lock   = threading.Lock()
+_slowdown_active = False
+_SLOWDOWN_TARGET = 500   # RPM — disarm once below this
+_SLOWDOWN_STEP   = 10    # DShot units per interval
+_SLOWDOWN_INTERVAL = 0.2 # seconds between steps
+
 _RPM_DEADBAND  = 75    # RPM — no adjustment within this band
 _RPM_LOCKED_TH = 150   # RPM — "locked" display threshold
 _RPM_STEP_MIN  = 5     # DShot minimum step (far from target)
@@ -316,6 +325,67 @@ def set_speed():
     speed = max(0, min(1047, int(data.get('speed', 0))))
     serial_manager.set_motor_speed(speed)
     return jsonify({'ok': True, 'speed': speed})
+
+
+def _do_slowdown():
+    global _slowdown_active, _rpm_enabled, _rpm_current_thr
+    # Stop RPM controller so it doesn't fight the ramp-down
+    with _rpm_ctrl_lock:
+        _rpm_enabled     = False
+        _rpm_current_thr = 0.0
+
+    st  = serial_manager.get_status()
+    thr = float(st['esc'].get('throttle_raw', _RPM_MIN_THR))
+    thr = max(float(_RPM_MIN_THR), thr)
+
+    _sse_push({'type': 'slowdown', 'state': 'running'})
+
+    while True:
+        with _slowdown_lock:
+            if not _slowdown_active:
+                _sse_push({'type': 'slowdown', 'state': 'cancelled'})
+                return
+
+        st          = serial_manager.get_status()
+        current_rpm = st['esc'].get('rpm') or st['hall'].get('rpm', 0) or 0
+
+        if 0 < current_rpm < _SLOWDOWN_TARGET:
+            serial_manager.set_motor_speed(0)
+            with _slowdown_lock:
+                _slowdown_active = False
+            _sse_push({'type': 'slowdown', 'state': 'done', 'rpm': current_rpm})
+            return
+
+        thr = max(float(_RPM_MIN_THR), thr - _SLOWDOWN_STEP)
+        serial_manager.set_motor_speed(round(thr))
+        _sse_push({'type': 'slowdown', 'state': 'running',
+                   'throttle': round(thr), 'rpm': current_rpm})
+
+        if thr <= _RPM_MIN_THR:
+            # Reached floor — give motor 2 s to coast below target then disarm
+            time.sleep(2.0)
+            serial_manager.set_motor_speed(0)
+            with _slowdown_lock:
+                _slowdown_active = False
+            _sse_push({'type': 'slowdown', 'state': 'done', 'rpm': 0})
+            return
+
+        time.sleep(_SLOWDOWN_INTERVAL)
+
+
+@app.route('/api/motor/slowdown', methods=['POST'])
+def motor_slowdown():
+    global _slowdown_active
+    with _slowdown_lock:
+        if _slowdown_active:
+            _slowdown_active = False          # signal thread to stop
+            return jsonify({'ok': True, 'state': 'cancelled'})
+        if not serial_manager.get_status()['esc'].get('armed', False):
+            return jsonify({'ok': False, 'error': 'motor not armed'})
+        _slowdown_active = True
+
+    threading.Thread(target=_do_slowdown, daemon=True).start()
+    return jsonify({'ok': True, 'state': 'started'})
 
 
 @app.route('/api/status')

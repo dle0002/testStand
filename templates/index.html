@@ -273,11 +273,11 @@
         <!-- Throttle controls (shown in throttle mode) -->
         <div id="throttle-section">
           <div class="speed-display" id="disp-speed">0</div>
-          <div class="speed-pct">% throttle</div>
-          <input type="range" id="slider" min="0" max="100" value="0" step="1"
+          <div class="speed-pct">DShot throttle</div>
+          <input type="range" id="slider" min="0" max="1047" value="0" step="1"
                  oninput="onSlider(this.value)" style="--pct:0%">
           <div class="speed-row">
-            <input type="number" id="num-speed" min="0" max="100" value="0"
+            <input type="number" id="num-speed" min="0" max="1047" value="0"
                    onchange="onNumChange(this.value)">
             <button class="btn btn-set" onclick="applySpeed()">SET</button>
           </div>
@@ -297,7 +297,7 @@
             Controller idle
           </div>
           <div style="margin-top:3px;font-size:11px;text-align:center;color:var(--muted)">
-            throttle: <span id="rpm-ctrl-thr" style="color:var(--blue)">—</span>%
+            throttle: <span id="rpm-ctrl-thr" style="color:var(--blue)">—</span> DS
           </div>
         </div>
 
@@ -450,7 +450,7 @@
         <div class="metric-cell">
           <div class="label">Throttle</div>
           <div class="val" id="bar-throttle" style="color:var(--blue)">0</div>
-          <div class="unit2">%</div>
+          <div class="unit2">DS</div>
         </div>
       </div>
 
@@ -617,17 +617,18 @@ function closePlotModal() {
 // -----------------------------------------------------------------------
 function onSlider(v) {
   v = parseInt(v);
+  const pct = Math.round(v / 1047 * 100);
   document.getElementById('num-speed').value = v;
   document.getElementById('disp-speed').textContent = v;
-  document.getElementById('slider').style.setProperty('--pct', v + '%');
+  document.getElementById('slider').style.setProperty('--pct', pct + '%');
   // colour the slider based on throttle level
   const slider = document.getElementById('slider');
-  const colour = v === 0 ? 'var(--muted)' : v < 30 ? 'var(--green)' : v < 70 ? 'var(--yellow)' : 'var(--red)';
-  slider.style.background = `linear-gradient(to right, ${colour} 0%, ${colour} ${v}%, var(--border) ${v}%, var(--border) 100%)`;
+  const colour = v === 0 ? 'var(--muted)' : v < 314 ? 'var(--green)' : v < 733 ? 'var(--yellow)' : 'var(--red)';
+  slider.style.background = `linear-gradient(to right, ${colour} 0%, ${colour} ${pct}%, var(--border) ${pct}%, var(--border) 100%)`;
 }
 
 function onNumChange(v) {
-  v = Math.max(0, Math.min(100, parseInt(v) || 0));
+  v = Math.max(0, Math.min(1047, parseInt(v) || 0));
   document.getElementById('slider').value = v;
   onSlider(v);
 }
@@ -840,7 +841,7 @@ function applyStatus(data) {
   const current  = e.current  != null ? e.current.toFixed(2) + ' A' : '—';
   const temp     = e.temp     != null ? e.temp + ' °C'               : '—';
   const mah      = e.mah      != null ? e.mah + ' mAh'               : '—';
-  const throttle = e.throttle_pct ?? 0;
+  const throttle = e.throttle_raw ?? 0;
 
   setEl('m-rpm',      rpm);
   setEl('m-esc-rpm',  escRpm);

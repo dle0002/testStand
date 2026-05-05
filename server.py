@@ -137,15 +137,19 @@ _rec_start  = 0.0
 _rpm_ctrl_lock   = threading.Lock()
 _rpm_enabled     = False
 _rpm_target      = 0       # target RPM (0 = disabled)
-_rpm_current_thr = 0.0     # float throttle % tracked by controller
+_rpm_current_thr = 0.0     # float DShot value tracked by controller
 
 _RPM_DEADBAND  = 75    # RPM — no adjustment within this band
 _RPM_LOCKED_TH = 150   # RPM — "locked" display threshold
-_RPM_STEP_MIN  = 0.5   # % throttle minimum step per interval
-_RPM_STEP_MAX  = 2.0   # % throttle maximum step per interval
+_RPM_STEP_MIN  = 5     # DShot minimum step (far from target)
+_RPM_STEP_MAX  = 20    # DShot maximum step per interval
+_RPM_STEP_NEAR = 2     # DShot step when inside near-zone
+_RPM_NEAR_ZONE = 225   # RPM — switch to fine steps within this band (3× deadband)
+_RPM_KD        = 0.4   # derivative damping: fraction to subtract when already converging
+_RPM_EMA       = 0.4   # EMA alpha for RPM smoothing (higher = less smoothing)
 _RPM_INTERVAL  = 0.2   # seconds between controller iterations
-_RPM_MAX_THR   = 85    # % throttle ceiling
-_RPM_MIN_THR   = 1     # % throttle floor
+_RPM_MAX_THR   = 900   # DShot throttle ceiling
+_RPM_MIN_THR   = 47    # DShot throttle floor (armed minimum)
 
 
 def _generate_plot(data: list[dict], path: str):
@@ -156,7 +160,7 @@ def _generate_plot(data: list[dict], path: str):
     voltage  = [d['voltage_v']    for d in data]
     current  = [d['current_a']    for d in data]
     temp     = [d['temp_c']       for d in data]
-    throttle = [d['throttle_pct'] for d in data]
+    throttle = [d['throttle'] for d in data]
     pos_v    = [d.get('pos_voltage', 0.0) for d in data]
     neg_v    = [d.get('neg_voltage', 0.0) for d in data]
 
@@ -192,7 +196,7 @@ def _generate_plot(data: list[dict], path: str):
     _style(ax)
     ax.plot(times, rpm_hall, color='#bc8cff', linewidth=1.5, label='Hall RPM')
     ax.plot(times, rpm_esc,  color='#f0883e', linewidth=1.5, label='ESC RPM')
-    ax.plot(times, [t * (max(rpm_hall + rpm_esc) or 1) / 100 for t in throttle],
+    ax.plot(times, [t * (max(rpm_hall + rpm_esc) or 1) / 1047 for t in throttle],
             color='#58a6ff', linewidth=1, linestyle=':', alpha=0.6, label='Throttle (scaled)')
     ax.set_ylabel('RPM')
     ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
@@ -286,6 +290,8 @@ def set_rpm_target():
         _rpm_enabled = enable and target > 0
         if not _rpm_enabled:
             _rpm_current_thr = 0.0
+        elif _rpm_current_thr == 0.0:
+            _rpm_current_thr = float(_RPM_MIN_THR)
 
     if not _rpm_enabled:
         serial_manager.set_motor_speed(0)
@@ -296,7 +302,7 @@ def set_rpm_target():
 @app.route('/api/motor/speed', methods=['POST'])
 def set_speed():
     data = request.get_json(force=True)
-    speed = max(0, min(100, int(data.get('speed', 0))))
+    speed = max(0, min(1047, int(data.get('speed', 0))))
     serial_manager.set_motor_speed(speed)
     return jsonify({'ok': True, 'speed': speed})
 
@@ -421,8 +427,8 @@ def add_cal_point():
     data  = request.get_json(force=True)
     pitch = float(data.get('pitch_deg', 0))
 
-    THR_LOW       = 5      # % throttle at sweep start/end
-    THR_HIGH      = 15     # % throttle at sweep peak
+    THR_LOW       = 150    # DShot throttle at sweep start/end
+    THR_HIGH      = 350    # DShot throttle at sweep peak
     RAMP_DURATION = 10.0   # seconds per ramp leg
     STEP_INTERVAL = 0.2    # seconds between throttle steps
     steps = int(RAMP_DURATION / STEP_INTERVAL)
@@ -496,6 +502,8 @@ def clear_calibration():
 def _rpm_controller():
     """Closed-loop RPM controller: nudges throttle toward target RPM."""
     global _rpm_current_thr, _rpm_enabled
+    prev_error = 0
+    smooth_rpm = 0.0
     while True:
         with _rpm_ctrl_lock:
             enabled = _rpm_enabled
@@ -503,32 +511,52 @@ def _rpm_controller():
             thr     = _rpm_current_thr
 
         if enabled and target > 0:
-            st          = serial_manager.get_status()
-            current_rpm = st['esc'].get('rpm') or st['hall'].get('rpm', 0) or 0
-            error       = target - current_rpm
+            st         = serial_manager.get_status()
+            raw_rpm    = st['esc'].get('rpm') or st['hall'].get('rpm', 0) or 0
+            smooth_rpm = _RPM_EMA * raw_rpm + (1 - _RPM_EMA) * smooth_rpm
+            error      = target - smooth_rpm
+            d_error    = error - prev_error   # negative when converging
 
             if abs(error) > _RPM_DEADBAND:
-                raw_step = abs(error) / 2000.0
-                step     = max(_RPM_STEP_MIN, min(_RPM_STEP_MAX, raw_step))
-                if error > 0:
-                    thr = min(_RPM_MAX_THR, thr + step)
+                # Fine steps near target, coarser steps when far away
+                if abs(error) < _RPM_NEAR_ZONE:
+                    step = _RPM_STEP_NEAR
                 else:
-                    thr = max(_RPM_MIN_THR, thr - step)
+                    raw_step = abs(error) / 100.0
+                    step     = max(_RPM_STEP_MIN, min(_RPM_STEP_MAX, raw_step))
 
-                # Safety: near ceiling with no RPM response → abort
-                if thr >= _RPM_MAX_THR * 0.98 and current_rpm < 200:
+                # Derivative damping: reduce step when already converging
+                converging = (error > 0 and d_error < 0) or (error < 0 and d_error > 0)
+                if converging:
+                    step = max(0.0, step - _RPM_KD * abs(d_error) / max(abs(error), 1))
+
+                if step > 0:
+                    if error > 0:
+                        thr = min(_RPM_MAX_THR, thr + step)
+                    else:
+                        thr = max(_RPM_MIN_THR, thr - step)
+
+                    # Safety: near ceiling with no RPM response → abort
+                    if thr >= _RPM_MAX_THR * 0.98 and raw_rpm < 200:
+                        with _rpm_ctrl_lock:
+                            _rpm_enabled     = False
+                            _rpm_current_thr = 0.0
+                        serial_manager.set_motor_speed(0)
+                        _sse_push({'type': 'rpm_ctrl_error',
+                                   'error': 'Motor not responding — controller disabled'})
+                        prev_error = 0
+                        smooth_rpm = 0.0
+                        time.sleep(_RPM_INTERVAL)
+                        continue
+
                     with _rpm_ctrl_lock:
-                        _rpm_enabled     = False
-                        _rpm_current_thr = 0.0
-                    serial_manager.set_motor_speed(0)
-                    _sse_push({'type': 'rpm_ctrl_error',
-                               'error': 'Motor not responding — controller disabled'})
-                    time.sleep(_RPM_INTERVAL)
-                    continue
+                        _rpm_current_thr = thr
+                    serial_manager.set_motor_speed(round(thr))
 
-                with _rpm_ctrl_lock:
-                    _rpm_current_thr = thr
-                serial_manager.set_motor_speed(round(thr))
+            prev_error = error
+        else:
+            prev_error = 0
+            smooth_rpm = 0.0
 
         time.sleep(_RPM_INTERVAL)
 
@@ -577,7 +605,7 @@ def _recorder():
             pitch_neg = _interpolate_pitch(neg_v, 'negative', cal)
             _rec_data.append({
                 'time_s':       round(time.time() - start, 4),
-                'throttle_pct': st['esc'].get('throttle_pct', 0),
+                'throttle': st['esc'].get('throttle_raw', 0),
                 'rpm_hall':     st['hall'].get('rpm', 0),
                 'weight_g':     st['loadcell'].get('weight', 0.0),
                 'esc_rpm':      st['esc'].get('rpm', 0),

@@ -5,8 +5,8 @@ Serial manager — connects to the 3 USB microcontrollers:
   esc       ESP32      esc_handler firmware  (DShot300 + KISS telemetry)
 
 ESC throttle range:
-  0   → DISARM
-  1-100 % → T:48 … T:2047  (THR_MIN=48, THR_MAX=2047)
+  0       → DISARM
+  47-1047 → T:47 … T:1047  (THR_MIN=47, THR_MAX=1047)
 
 Port assignment: set HALL_PORT / LOADCELL_PORT / ESC_PORT explicitly, or
 leave all as None to use auto-detection (reads startup banners).
@@ -26,9 +26,9 @@ LOADCELL_PORT = None   # e.g. '/dev/ttyACM1'
 ESC_PORT      = None   # e.g. '/dev/ttyACM2'
 BAUD          = 115200
 
-# ESC DShot throttle range (from firmware constants)
-_ESC_THR_MIN = 48
-_ESC_THR_MAX = 2047
+# ESC DShot throttle range
+_ESC_THR_MIN = 47
+_ESC_THR_MAX = 1047
 
 # -----------------------------------------------------------------------
 _HALL_RE      = re.compile(r'POL:([+-]) V:([\d.]+) RPM:(\d+)')
@@ -61,7 +61,7 @@ _state: dict = {
         'connected': False, 'port': None,
     },
     'esc': {
-        'throttle_pct': 0, 'throttle_raw': 0,
+        'throttle_raw': 0,
         'armed': False,
         'rpm': 0, 'voltage': 0.0, 'current': 0.0,
         'temp': 0, 'mah': 0,
@@ -83,12 +83,6 @@ def _write(ser: serial.Serial, cmd: str):
     """Write a command with CRLF line ending (required by ESP32 firmware)."""
     ser.write((cmd + '\r\n').encode())
 
-
-def _pct_to_dshot(pct: int) -> int:
-    """Map 1-100 % → THR_MIN…THR_MAX. 0 % → 0 (DISARM)."""
-    if pct <= 0:
-        return 0
-    return _ESC_THR_MIN + round((pct / 100) * (_ESC_THR_MAX - _ESC_THR_MIN))
 
 
 def _read_loop(source: str, ser: serial.Serial):
@@ -311,7 +305,6 @@ def arm_esc():
 def disarm_esc():
     with _lock:
         ser = _serials.get('esc')
-        _state['esc']['throttle_pct'] = 0
         _state['esc']['throttle_raw'] = 0
         _state['esc']['armed']        = False
     if ser:
@@ -319,27 +312,25 @@ def disarm_esc():
 
 
 def set_motor_speed(speed: int):
-    """Set throttle. speed: 0-100 %.
+    """Set throttle. speed: 0 = DISARM, 47-1047 = DShot value.
     0  → DISARM (motor off, also disarms)
-    >0 → ARM if needed, then T:<dshot>
+    >0 → ARM if needed, then T:<speed>
     """
-    speed = max(0, min(100, speed))
+    speed = max(0, min(_ESC_THR_MAX, speed))
     if speed == 0:
         disarm_esc()
         return
-    dshot = _pct_to_dshot(speed)
     with _lock:
         ser   = _serials.get('esc')
         armed = _state['esc'].get('armed', False)
-        _state['esc']['throttle_pct'] = speed
-        _state['esc']['throttle_raw'] = dshot
+        _state['esc']['throttle_raw'] = speed
     if ser:
         if not armed:
             _write(ser, "ARM")
             with _lock:
                 _state['esc']['armed'] = True
             time.sleep(0.05)
-        _write(ser, f"T:{dshot}")
+        _write(ser, f"T:{speed}")
 
 
 def sync_all():

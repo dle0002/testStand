@@ -264,15 +264,43 @@
           <div class="dot"></div> DISARMED
         </div>
 
-        <div class="speed-display" id="disp-speed">0</div>
-        <div class="speed-pct">% throttle</div>
-        <input type="range" id="slider" min="0" max="100" value="0" step="1"
-               oninput="onSlider(this.value)" style="--pct:0%">
-        <div class="speed-row">
-          <input type="number" id="num-speed" min="0" max="100" value="0"
-                 onchange="onNumChange(this.value)">
-          <button class="btn btn-set" onclick="applySpeed()">SET</button>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span style="font-size:11px;color:var(--muted);flex:1">Mode</span>
+          <button id="rpm-mode-btn" onclick="toggleRpmMode()"
+                  class="btn btn-set" style="flex:0;font-size:11px;padding:4px 14px">THROTTLE</button>
         </div>
+
+        <!-- Throttle controls (shown in throttle mode) -->
+        <div id="throttle-section">
+          <div class="speed-display" id="disp-speed">0</div>
+          <div class="speed-pct">% throttle</div>
+          <input type="range" id="slider" min="0" max="100" value="0" step="1"
+                 oninput="onSlider(this.value)" style="--pct:0%">
+          <div class="speed-row">
+            <input type="number" id="num-speed" min="0" max="100" value="0"
+                   onchange="onNumChange(this.value)">
+            <button class="btn btn-set" onclick="applySpeed()">SET</button>
+          </div>
+        </div>
+
+        <!-- RPM target controls (shown in RPM mode) -->
+        <div id="rpm-section" style="display:none">
+          <div class="speed-display" id="disp-rpm-target" style="color:var(--purple)">0</div>
+          <div class="speed-pct">target RPM</div>
+          <div class="speed-row">
+            <input type="number" id="num-rpm" min="0" max="30000" value="0" step="100"
+                   style="width:90px" onchange="onRpmNumChange(this.value)">
+            <button class="btn btn-set" onclick="applyRpm()">SET</button>
+          </div>
+          <div id="rpm-status"
+               style="margin-top:6px;font-size:11px;text-align:center;min-height:16px;color:var(--muted)">
+            Controller idle
+          </div>
+          <div style="margin-top:3px;font-size:11px;text-align:center;color:var(--muted)">
+            throttle: <span id="rpm-ctrl-thr" style="color:var(--blue)">—</span>%
+          </div>
+        </div>
+
         <div class="arm-row">
           <button class="btn btn-arm"    onclick="armEsc()">ARM</button>
           <button class="btn btn-disarm" onclick="disarmEsc()">DISARM</button>
@@ -614,6 +642,7 @@ function applySpeed() {
 }
 
 function emergencyStop() {
+  if (_rpmMode) _disableRpmCtrl('STOPPED — re-SET to resume');
   document.getElementById('slider').value = 0;
   onSlider(0);
   fetch('/api/motor/speed', {
@@ -632,6 +661,7 @@ function armEsc() {
 }
 
 function disarmEsc() {
+  if (_rpmMode) _disableRpmCtrl('Disarmed');
   document.getElementById('slider').value = 0;
   onSlider(0);
   fetch('/api/command', {
@@ -643,6 +673,65 @@ function disarmEsc() {
 
 // Set on slider release (touch-friendly)
 document.getElementById('slider').addEventListener('change', applySpeed);
+
+// -----------------------------------------------------------------------
+// RPM mode (closed-loop control)
+// -----------------------------------------------------------------------
+let _rpmMode = false;
+
+function _disableRpmCtrl(msg) {
+  fetch('/api/motor/rpm', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({rpm: 0, enable: false})
+  }).catch(console.error);
+  const statusEl = document.getElementById('rpm-status');
+  const thrEl    = document.getElementById('rpm-ctrl-thr');
+  if (statusEl) {
+    statusEl.textContent = msg || 'Controller idle';
+    statusEl.style.color = msg ? 'var(--red)' : 'var(--muted)';
+  }
+  if (thrEl) thrEl.textContent = '—';
+}
+
+function toggleRpmMode() {
+  _rpmMode = !_rpmMode;
+  const btn = document.getElementById('rpm-mode-btn');
+  btn.textContent       = _rpmMode ? 'RPM' : 'THROTTLE';
+  btn.style.background  = _rpmMode ? 'var(--purple)' : 'var(--blue)';
+  document.getElementById('throttle-section').style.display = _rpmMode ? 'none' : '';
+  document.getElementById('rpm-section').style.display      = _rpmMode ? '' : 'none';
+  if (!_rpmMode) _disableRpmCtrl();
+}
+
+function onRpmNumChange(v) {
+  v = Math.max(0, Math.min(30000, parseInt(v) || 0));
+  document.getElementById('num-rpm').value = v;
+  document.getElementById('disp-rpm-target').textContent = v.toLocaleString();
+}
+
+function applyRpm() {
+  const rpm      = Math.max(0, parseInt(document.getElementById('num-rpm').value) || 0);
+  const statusEl = document.getElementById('rpm-status');
+  document.getElementById('disp-rpm-target').textContent = rpm.toLocaleString();
+  fetch('/api/motor/rpm', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({rpm, enable: rpm > 0})
+  })
+    .then(r => r.json())
+    .then(() => {
+      if (!statusEl) return;
+      if (rpm === 0) {
+        statusEl.textContent = 'Controller idle';
+        statusEl.style.color = 'var(--muted)';
+      } else {
+        statusEl.textContent = `Seeking ${rpm.toLocaleString()} RPM…`;
+        statusEl.style.color = 'var(--yellow)';
+      }
+    })
+    .catch(console.error);
+}
 
 // -----------------------------------------------------------------------
 // Port rescan
@@ -792,6 +881,25 @@ function applyStatus(data) {
     onSlider(t);
     document.getElementById('disp-speed').textContent = t;
   }
+
+  // RPM controller status
+  if (data.rpm_ctrl) {
+    const rc    = data.rpm_ctrl;
+    const thrEl = document.getElementById('rpm-ctrl-thr');
+    if (thrEl && rc.throttle != null) thrEl.textContent = rc.throttle;
+    if (_rpmMode && rc.enabled) {
+      const statusEl = document.getElementById('rpm-status');
+      if (statusEl) {
+        if (rc.locked) {
+          statusEl.textContent = `Locked — ${(rc.target || 0).toLocaleString()} RPM`;
+          statusEl.style.color = 'var(--green)';
+        } else {
+          statusEl.textContent = `Seeking ${(rc.target || 0).toLocaleString()} RPM…`;
+          statusEl.style.color = 'var(--yellow)';
+        }
+      }
+    }
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -880,6 +988,13 @@ function connectSSE() {
     } else if (data.type === 'calibration_update') {
       _calPoints = {positive: {}, negative: {}, ...(data.points || {})};
       _renderCalTable();
+    } else if (data.type === 'rpm_ctrl_error') {
+      appendLog('esc', `[RPM ctrl: ${data.error}]`, 'system');
+      const statusEl = document.getElementById('rpm-status');
+      if (statusEl) {
+        statusEl.textContent = `Error: ${data.error}`;
+        statusEl.style.color = 'var(--red)';
+      }
     }
   };
 

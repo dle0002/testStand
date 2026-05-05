@@ -131,6 +131,22 @@ _rec_data: list[dict] = []
 _rec_rate   = 10.0          # Hz — controlled by /api/logging/rate
 _rec_start  = 0.0
 
+# -----------------------------------------------------------------------
+# Closed-loop RPM controller
+# -----------------------------------------------------------------------
+_rpm_ctrl_lock   = threading.Lock()
+_rpm_enabled     = False
+_rpm_target      = 0       # target RPM (0 = disabled)
+_rpm_current_thr = 0.0     # float throttle % tracked by controller
+
+_RPM_DEADBAND  = 75    # RPM — no adjustment within this band
+_RPM_LOCKED_TH = 150   # RPM — "locked" display threshold
+_RPM_STEP_MIN  = 0.5   # % throttle minimum step per interval
+_RPM_STEP_MAX  = 2.0   # % throttle maximum step per interval
+_RPM_INTERVAL  = 0.2   # seconds between controller iterations
+_RPM_MAX_THR   = 85    # % throttle ceiling
+_RPM_MIN_THR   = 1     # % throttle floor
+
 
 def _generate_plot(data: list[dict], path: str):
     times    = [d['time_s']       for d in data]
@@ -256,6 +272,25 @@ def _generate_plot(data: list[dict], path: str):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/api/motor/rpm', methods=['POST'])
+def set_rpm_target():
+    global _rpm_enabled, _rpm_target, _rpm_current_thr
+    data   = request.get_json(force=True)
+    target = max(0, int(data.get('rpm', 0)))
+    enable = bool(data.get('enable', target > 0))
+
+    with _rpm_ctrl_lock:
+        _rpm_target  = target
+        _rpm_enabled = enable and target > 0
+        if not _rpm_enabled:
+            _rpm_current_thr = 0.0
+
+    if not _rpm_enabled:
+        serial_manager.set_motor_speed(0)
+
+    return jsonify({'ok': True, 'rpm_target': target, 'enabled': _rpm_enabled})
 
 
 @app.route('/api/motor/speed', methods=['POST'])
@@ -458,6 +493,46 @@ def clear_calibration():
 # -----------------------------------------------------------------------
 # Background threads
 # -----------------------------------------------------------------------
+def _rpm_controller():
+    """Closed-loop RPM controller: nudges throttle toward target RPM."""
+    global _rpm_current_thr, _rpm_enabled
+    while True:
+        with _rpm_ctrl_lock:
+            enabled = _rpm_enabled
+            target  = _rpm_target
+            thr     = _rpm_current_thr
+
+        if enabled and target > 0:
+            st          = serial_manager.get_status()
+            current_rpm = st['esc'].get('rpm') or st['hall'].get('rpm', 0) or 0
+            error       = target - current_rpm
+
+            if abs(error) > _RPM_DEADBAND:
+                raw_step = abs(error) / 2000.0
+                step     = max(_RPM_STEP_MIN, min(_RPM_STEP_MAX, raw_step))
+                if error > 0:
+                    thr = min(_RPM_MAX_THR, thr + step)
+                else:
+                    thr = max(_RPM_MIN_THR, thr - step)
+
+                # Safety: near ceiling with no RPM response → abort
+                if thr >= _RPM_MAX_THR * 0.98 and current_rpm < 200:
+                    with _rpm_ctrl_lock:
+                        _rpm_enabled     = False
+                        _rpm_current_thr = 0.0
+                    serial_manager.set_motor_speed(0)
+                    _sse_push({'type': 'rpm_ctrl_error',
+                               'error': 'Motor not responding — controller disabled'})
+                    time.sleep(_RPM_INTERVAL)
+                    continue
+
+                with _rpm_ctrl_lock:
+                    _rpm_current_thr = thr
+                serial_manager.set_motor_speed(round(thr))
+
+        time.sleep(_RPM_INTERVAL)
+
+
 def _streamer():
     """Push serial lines + periodic status to SSE clients."""
     last_status = 0.0
@@ -467,7 +542,18 @@ def _streamer():
 
         now = time.time()
         if now - last_status >= 1.0:
-            _sse_push({'type': 'status', **serial_manager.get_status()})
+            st = serial_manager.get_status()
+            with _rpm_ctrl_lock:
+                rpm_ctrl = {
+                    'enabled':  _rpm_enabled,
+                    'target':   _rpm_target,
+                    'throttle': round(_rpm_current_thr, 1),
+                }
+            if _rpm_enabled and _rpm_target > 0:
+                current_rpm = st['esc'].get('rpm') or st['hall'].get('rpm', 0) or 0
+                rpm_ctrl['locked']      = abs(_rpm_target - current_rpm) <= _RPM_LOCKED_TH
+                rpm_ctrl['current_rpm'] = current_rpm
+            _sse_push({'type': 'status', **st, 'rpm_ctrl': rpm_ctrl})
             last_status = now
 
         time.sleep(0.04)
@@ -515,8 +601,9 @@ if __name__ == '__main__':
     # Apply default 10 Hz logging rate on startup
     serial_manager.set_log_rate(10.0)
 
-    threading.Thread(target=_streamer,  daemon=True).start()
-    threading.Thread(target=_recorder,  daemon=True).start()
+    threading.Thread(target=_streamer,      daemon=True).start()
+    threading.Thread(target=_recorder,      daemon=True).start()
+    threading.Thread(target=_rpm_controller, daemon=True).start()
 
     print('=' * 52)
     print('Propeller Teststand server on http://0.0.0.0:5000')

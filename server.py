@@ -20,6 +20,7 @@ import os
 import queue
 import threading
 import time
+from collections import deque
 from datetime import datetime
 
 import matplotlib
@@ -150,6 +151,16 @@ _RPM_EMA       = 0.4   # EMA alpha for RPM smoothing (higher = less smoothing)
 _RPM_INTERVAL  = 0.2   # seconds between controller iterations
 _RPM_MAX_THR   = 900   # DShot throttle ceiling
 _RPM_MIN_THR   = 47    # DShot throttle floor (armed minimum)
+
+# -----------------------------------------------------------------------
+# Pitch angle median filter
+# -----------------------------------------------------------------------
+_pitch_filter_lock   = threading.Lock()
+_pitch_filter_window = 5
+_pitch_buf_pos: deque = deque(maxlen=5)
+_pitch_buf_neg: deque = deque(maxlen=5)
+_pitch_live_pos: float | None = None
+_pitch_live_neg: float | None = None
 
 
 def _generate_plot(data: list[dict], path: str):
@@ -352,6 +363,18 @@ def set_logging_rate():
         _rec_rate = rate
     serial_manager.set_log_rate(rate)
     return jsonify({'ok': True, 'rate': rate})
+
+
+@app.route('/api/pitch/filter', methods=['POST'])
+def set_pitch_filter():
+    global _pitch_filter_window, _pitch_buf_pos, _pitch_buf_neg
+    data = request.get_json(force=True)
+    w = max(1, min(51, int(data.get('window', 5))))
+    with _pitch_filter_lock:
+        _pitch_filter_window = w
+        _pitch_buf_pos = deque(maxlen=w)
+        _pitch_buf_neg = deque(maxlen=w)
+    return jsonify({'ok': True, 'window': w})
 
 
 @app.route('/api/recording/start', methods=['POST'])
@@ -588,39 +611,51 @@ def _streamer():
 
 
 def _recorder():
-    """Poll sensor state and store rows while recording is active."""
+    """Poll sensor state, maintain pitch filter, and store rows while recording."""
+    global _pitch_live_pos, _pitch_live_neg
     while True:
         with _rec_lock:
             active = _recording
             rate   = _rec_rate
             start  = _rec_start
 
+        st    = serial_manager.get_status()
+        pos_v = st['hall'].get('pos_voltage', 0.0)
+        neg_v = st['hall'].get('neg_voltage', 0.0)
+        with _cal_srv_lock:
+            cal = dict(_calibration)
+
+        # Update median filter (always, so live display stays current)
+        raw_pos = _interpolate_pitch(pos_v, 'positive', cal)
+        raw_neg = _interpolate_pitch(neg_v, 'negative', cal)
+        with _pitch_filter_lock:
+            if raw_pos is not None:
+                _pitch_buf_pos.append(raw_pos)
+                _pitch_live_pos = sorted(_pitch_buf_pos)[len(_pitch_buf_pos) // 2]
+            if raw_neg is not None:
+                _pitch_buf_neg.append(raw_neg)
+                _pitch_live_neg = sorted(_pitch_buf_neg)[len(_pitch_buf_neg) // 2]
+            pitch_pos_f = _pitch_live_pos
+            pitch_neg_f = _pitch_live_neg
+
         if active:
-            st  = serial_manager.get_status()
-            pos_v = st['hall'].get('pos_voltage', 0.0)
-            neg_v = st['hall'].get('neg_voltage', 0.0)
-            with _cal_srv_lock:
-                cal = dict(_calibration)
-            pitch_pos = _interpolate_pitch(pos_v, 'positive', cal)
-            pitch_neg = _interpolate_pitch(neg_v, 'negative', cal)
             _rec_data.append({
-                'time_s':       round(time.time() - start, 4),
-                'throttle': st['esc'].get('throttle_raw', 0),
-                'rpm_hall':     st['hall'].get('rpm', 0),
-                'weight_g':     st['loadcell'].get('weight', 0.0),
-                'esc_rpm':      st['esc'].get('rpm', 0),
-                'voltage_v':    st['esc'].get('voltage', 0.0),
-                'current_a':    st['esc'].get('current', 0.0),
-                'temp_c':       st['esc'].get('temp', 0),
-                'mah':          st['esc'].get('mah', 0),
-                'pos_voltage':  round(pos_v, 4),
-                'neg_voltage':  round(neg_v, 4),
-                'pitch_pos':    round(pitch_pos, 2) if pitch_pos is not None else '',
-                'pitch_neg':    round(pitch_neg, 2) if pitch_neg is not None else '',
+                'time_s':      round(time.time() - start, 4),
+                'throttle':    st['esc'].get('throttle_raw', 0),
+                'rpm_hall':    st['hall'].get('rpm', 0),
+                'weight_g':    st['loadcell'].get('weight', 0.0),
+                'esc_rpm':     st['esc'].get('rpm', 0),
+                'voltage_v':   st['esc'].get('voltage', 0.0),
+                'current_a':   st['esc'].get('current', 0.0),
+                'temp_c':      st['esc'].get('temp', 0),
+                'mah':         st['esc'].get('mah', 0),
+                'pos_voltage': round(pos_v, 4),
+                'neg_voltage': round(neg_v, 4),
+                'pitch_pos':   round(pitch_pos_f, 2) if pitch_pos_f is not None else '',
+                'pitch_neg':   round(pitch_neg_f, 2) if pitch_neg_f is not None else '',
             })
-            time.sleep(1.0 / rate)
-        else:
-            time.sleep(0.1)
+
+        time.sleep(1.0 / rate if active else 0.1)
 
 
 # -----------------------------------------------------------------------

@@ -136,6 +136,22 @@
   .metric-cell .val   { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 1; }
   .metric-cell .unit2 { font-size: 11px; color: var(--muted); }
 
+  /* ---- rolling plots ------------------------------------------------- */
+  .plots-row {
+    display: grid; grid-template-columns: 1fr 1fr;
+    height: 170px; flex-shrink: 0; border-bottom: 1px solid var(--border);
+  }
+  .plot-pane {
+    position: relative; overflow: hidden; border-right: 1px solid var(--border);
+  }
+  .plot-pane:last-child { border-right: none; }
+  .plot-pane canvas { display: block; width: 100%; height: 100%; }
+  .plot-pane-label {
+    position: absolute; top: 4px; right: 8px;
+    font-size: 10px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .06em; color: var(--muted); pointer-events: none;
+  }
+
   .logs-grid {
     flex: 1; display: grid; grid-template-rows: repeat(3, 1fr); overflow: hidden;
   }
@@ -359,6 +375,13 @@
           <input type="number" id="ui-rate" value="1" min="0.1" max="30" step="0.5">
           <span class="unit">Hz</span>
         </div>
+        <div class="rate-row">
+          <label>Plot win.</label>
+          <input type="number" id="plot-window" value="60" min="5" max="300" step="5">
+          <span class="unit">s</span>
+          <button class="btn btn-set" onclick="applyPlotWindow()"
+                  style="flex:0;padding:5px 10px;font-size:11px">Set</button>
+        </div>
         <button class="btn btn-set" style="width:100%;margin-bottom:8px" onclick="applyRates()">Apply Rates</button>
 
         <button class="btn-record" id="rec-btn" onclick="toggleRecording()">⬤ Start Recording</button>
@@ -374,6 +397,15 @@
           <button id="cal-mode-btn" class="btn btn-set"
                   style="flex:0;font-size:11px;padding:4px 12px"
                   onclick="toggleCalMode()">OFF</button>
+        </div>
+
+        <div class="rate-row">
+          <label>Filter</label>
+          <input type="number" id="pitch-filter-w" value="5" min="1" max="51" step="2"
+                 style="width:64px">
+          <span class="unit">pts</span>
+          <button class="btn btn-set" onclick="applyPitchFilter()"
+                  style="flex:0;padding:5px 10px;font-size:11px">Set</button>
         </div>
 
         <div class="rate-row">
@@ -451,6 +483,17 @@
           <div class="label">Throttle</div>
           <div class="val" id="bar-throttle" style="color:var(--blue)">0</div>
           <div class="unit2">DS</div>
+        </div>
+      </div>
+
+      <div class="plots-row">
+        <div class="plot-pane">
+          <canvas id="chart-thrust"></canvas>
+          <span class="plot-pane-label">Thrust</span>
+        </div>
+        <div class="plot-pane">
+          <canvas id="chart-pitch"></canvas>
+          <span class="plot-pane-label">Pitch</span>
         </div>
       </div>
 
@@ -916,7 +959,6 @@ function parseLiveLine(source, line) {
   if (source === 'hall') {
     let m = _HALL_RE.exec(line);
     if (m) {
-      // groups: 1=polarity, 2=voltage, 3=rpm
       const rpm = parseInt(m[3]).toLocaleString();
       _lv('m-rpm',   rpm);
       _lv('bar-rpm', rpm);
@@ -924,11 +966,25 @@ function parseLiveLine(source, line) {
       if (m[1] === '+') {
         _liveHallPosV = v;
         _lv('m-hall-pos-v', v.toFixed(3) + ' V');
-        if (_calMode) _lv('m-pitch-pos', _interpolatePitch(v, 'positive'));
+        if (_calMode) {
+          const raw = _interpolatePitchNum(v, 'positive');
+          if (raw !== null) {
+            const filtered = _medianFilter(_pitchBufPos, raw, _pitchFilterW);
+            _lv('m-pitch-pos', filtered.toFixed(1) + '°');
+            if (_pitchChart) _pitchChart.push(0, filtered);
+          }
+        }
       } else {
         _liveHallNegV = v;
         _lv('m-hall-neg-v', v.toFixed(3) + ' V');
-        if (_calMode) _lv('m-pitch-neg', _interpolatePitch(v, 'negative'));
+        if (_calMode) {
+          const raw = _interpolatePitchNum(v, 'negative');
+          if (raw !== null) {
+            const filtered = _medianFilter(_pitchBufNeg, raw, _pitchFilterW);
+            _lv('m-pitch-neg', filtered.toFixed(1) + '°');
+            if (_pitchChart) _pitchChart.push(1, filtered);
+          }
+        }
       }
       return;
     }
@@ -939,9 +995,10 @@ function parseLiveLine(source, line) {
   } else if (source === 'loadcell') {
     const m = _LC_RE.exec(line);
     if (m) {
-      const w = parseFloat(m[2]).toFixed(1);
-      _lv('m-thrust',   w + ' g');
-      _lv('bar-thrust', w);
+      const w = parseFloat(m[2]);
+      _lv('m-thrust',   w.toFixed(1) + ' g');
+      _lv('bar-thrust', w.toFixed(1));
+      if (_thrustChart) _thrustChart.push(0, w);
     }
   } else if (source === 'esc') {
     const m = _ESC_RE.exec(line);
@@ -956,6 +1013,135 @@ function parseLiveLine(source, line) {
       _lv('m-mah',       m[7] + ' mAh');
     }
   }
+}
+
+// -----------------------------------------------------------------------
+// Rolling charts
+// -----------------------------------------------------------------------
+class RollingChart {
+  constructor(canvas, {yLabel='', series=[], windowS=60}) {
+    this.canvas  = canvas;
+    this.ctx     = canvas.getContext('2d');
+    this.yLabel  = yLabel;
+    this.windowS = windowS;
+    this.series  = series.map(s => ({...s, ts:[], ys:[]}));
+    this._raf    = false;
+    new ResizeObserver(() => this._onResize()).observe(canvas);
+    this._onResize();
+  }
+  _onResize() {
+    const dpr = devicePixelRatio || 1;
+    const r   = this.canvas.getBoundingClientRect();
+    this.canvas.width  = Math.round(r.width  * dpr);
+    this.canvas.height = Math.round(r.height * dpr);
+    this._schedule();
+  }
+  setWindow(s) { this.windowS = s; this._schedule(); }
+  push(idx, value) {
+    if (value == null || !isFinite(value)) return;
+    const s   = this.series[idx];
+    const now = Date.now() / 1000;
+    s.ts.push(now); s.ys.push(value);
+    const cut = now - this.windowS * 1.5;
+    while (s.ts.length && s.ts[0] < cut) { s.ts.shift(); s.ys.shift(); }
+    this._schedule();
+  }
+  _schedule() {
+    if (this._raf) return;
+    this._raf = true;
+    requestAnimationFrame(() => { this._raf = false; this._draw(); });
+  }
+  _draw() {
+    const {ctx, canvas, series, windowS, yLabel} = this;
+    const dpr = devicePixelRatio || 1;
+    const W   = canvas.width, H = canvas.height;
+    const ml=50*dpr, mr=8*dpr, mt=14*dpr, mb=24*dpr;
+    const pw=W-ml-mr, ph=H-mt-mb;
+    if (pw<=0||ph<=0) return;
+
+    ctx.fillStyle='#161b22'; ctx.fillRect(0,0,W,H);
+
+    let yMin=Infinity, yMax=-Infinity;
+    for (const s of series) for (const v of s.ys) { if(v<yMin)yMin=v; if(v>yMax)yMax=v; }
+    if (!isFinite(yMin)){yMin=0;yMax=1;}
+    if (yMin===yMax){yMin-=0.5;yMax+=0.5;}
+    const yPad=(yMax-yMin)*0.08; yMin-=yPad; yMax+=yPad;
+
+    const now=Date.now()/1000, xMin=now-windowS;
+
+    // Grid
+    const fnt=`${Math.round(10*dpr)}px sans-serif`;
+    ctx.font=fnt; ctx.strokeStyle='#30363d'; ctx.lineWidth=0.5*dpr;
+    ctx.strokeRect(ml,mt,pw,ph);
+    for (let i=0;i<=4;i++) {
+      const y=mt+ph*(1-i/4);
+      ctx.beginPath(); ctx.moveTo(ml,y); ctx.lineTo(ml+pw,y); ctx.stroke();
+      ctx.fillStyle='#8b949e'; ctx.textAlign='right';
+      ctx.fillText((yMin+(yMax-yMin)*i/4).toFixed(1), ml-3*dpr, y+3*dpr);
+    }
+    for (let i=0;i<=3;i++) {
+      ctx.fillStyle='#8b949e'; ctx.textAlign='center';
+      ctx.fillText(i===3?'now':`-${Math.round(windowS*(1-i/3))}s`,
+                   ml+pw*i/3, mt+ph+17*dpr);
+    }
+
+    // Lines
+    for (const s of series) {
+      if (s.ts.length < 2) continue;
+      ctx.strokeStyle=s.color; ctx.lineWidth=1.5*dpr;
+      ctx.beginPath(); let go=false;
+      for (let i=0;i<s.ts.length;i++) {
+        const x=ml+pw*(s.ts[i]-xMin)/windowS;
+        const y=mt+ph*(1-(s.ys[i]-yMin)/(yMax-yMin));
+        if (x < ml-1) continue;
+        if (!go){ctx.moveTo(x,y);go=true;} else ctx.lineTo(x,y);
+      }
+      ctx.stroke();
+    }
+
+    // Y-axis label
+    ctx.save(); ctx.translate(9*dpr,mt+ph/2); ctx.rotate(-Math.PI/2);
+    ctx.fillStyle='#8b949e'; ctx.font=fnt; ctx.textAlign='center';
+    ctx.fillText(yLabel,0,0); ctx.restore();
+
+    // Legend
+    let lx=ml+6*dpr;
+    for (const s of series) {
+      ctx.fillStyle=s.color; ctx.fillRect(lx, mt+4*dpr, 18*dpr, 2*dpr);
+      ctx.fillStyle='#8b949e'; ctx.textAlign='left'; ctx.font=fnt;
+      ctx.fillText(s.label, lx+22*dpr, mt+10*dpr);
+      lx += ctx.measureText(s.label).width + 36*dpr;
+    }
+  }
+}
+
+let _thrustChart, _pitchChart;
+let _plotWindowS  = 60;
+
+// Client-side pitch median filter
+const _pitchBufPos = [], _pitchBufNeg = [];
+let   _pitchFilterW = 5;
+
+function _medianFilter(buf, value, w) {
+  buf.push(value);
+  if (buf.length > w) buf.shift();
+  return buf.slice().sort((a,b)=>a-b)[Math.floor(buf.length/2)];
+}
+
+function applyPitchFilter() {
+  _pitchFilterW = Math.max(1, Math.min(51, parseInt(document.getElementById('pitch-filter-w').value)||5));
+  _pitchBufPos.length = 0;
+  _pitchBufNeg.length = 0;
+  fetch('/api/pitch/filter', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({window: _pitchFilterW})
+  }).catch(console.error);
+}
+
+function applyPlotWindow() {
+  _plotWindowS = Math.max(5, Math.min(300, parseInt(document.getElementById('plot-window').value)||60));
+  if (_thrustChart) _thrustChart.setWindow(_plotWindowS);
+  if (_pitchChart)  _pitchChart.setWindow(_plotWindowS);
 }
 
 // -----------------------------------------------------------------------
@@ -1014,22 +1200,33 @@ let _calPoints    = {positive: {}, negative: {}};
 let _liveHallPosV = null;
 let _liveHallNegV = null;
 
-function _interpolatePitch(voltage, polarity) {
+function _interpolatePitchNum(voltage, polarity) {
   const map = _calPoints[polarity] || {};
   const pts = Object.entries(map)
     .map(([k, v]) => ({pitch: parseFloat(k), voltage: parseFloat(v)}))
     .sort((a, b) => a.voltage - b.voltage);
-  if (pts.length === 0) return '—°';
-  if (pts.length === 1) return pts[0].pitch.toFixed(1) + '°';
-  if (voltage <= pts[0].voltage)              return pts[0].pitch.toFixed(1) + '° ←';
-  if (voltage >= pts[pts.length - 1].voltage) return pts[pts.length - 1].pitch.toFixed(1) + '° →';
+  if (pts.length === 0) return null;
+  if (pts.length === 1) return pts[0].pitch;
+  if (voltage <= pts[0].voltage)              return pts[0].pitch;
+  if (voltage >= pts[pts.length - 1].voltage) return pts[pts.length - 1].pitch;
   for (let i = 0; i < pts.length - 1; i++) {
     if (voltage >= pts[i].voltage && voltage <= pts[i + 1].voltage) {
       const t = (voltage - pts[i].voltage) / (pts[i + 1].voltage - pts[i].voltage);
-      return (pts[i].pitch + t * (pts[i + 1].pitch - pts[i].pitch)).toFixed(1) + '°';
+      return pts[i].pitch + t * (pts[i + 1].pitch - pts[i].pitch);
     }
   }
-  return '—°';
+  return null;
+}
+
+function _interpolatePitch(voltage, polarity) {
+  const raw = _interpolatePitchNum(voltage, polarity);
+  if (raw === null) return '—°';
+  const pts = Object.entries(_calPoints[polarity] || {})
+    .map(([k,v]) => ({pitch:parseFloat(k), voltage:parseFloat(v)}))
+    .sort((a,b)=>a.voltage-b.voltage);
+  const clampLow  = pts.length && voltage <= pts[0].voltage;
+  const clampHigh = pts.length && voltage >= pts[pts.length-1].voltage;
+  return raw.toFixed(1) + '°' + (clampLow ? ' ←' : clampHigh ? ' →' : '');
 }
 
 function toggleCalMode() {
@@ -1163,6 +1360,20 @@ fetch('/api/calibration')
   .catch(() => {});
 
 connectSSE();
+
+_thrustChart = new RollingChart(document.getElementById('chart-thrust'), {
+  yLabel: 'g',
+  series: [{label: 'Thrust (g)', color: '#3fb950'}],
+  windowS: _plotWindowS,
+});
+_pitchChart = new RollingChart(document.getElementById('chart-pitch'), {
+  yLabel: '°',
+  series: [
+    {label: 'Pitch (+)', color: '#bc8cff'},
+    {label: 'Pitch (−)', color: '#39d4cc'},
+  ],
+  windowS: _plotWindowS,
+});
 </script>
 </body>
 </html>

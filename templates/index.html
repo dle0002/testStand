@@ -252,6 +252,22 @@
   }
   .dl-link:hover { border-color: var(--blue); }
 
+  /* ---- trajectory --------------------------------------------------- */
+  .traj-table { width: 100%; border-collapse: collapse; margin-bottom: 4px; }
+  .traj-table th { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 2px 2px; text-align: left; font-weight: 600; }
+  .traj-table td { font-size: 12px; padding: 3px 2px; font-variant-numeric: tabular-nums; }
+  .traj-add-row { display: flex; gap: 5px; margin-bottom: 4px; align-items: center; }
+  .traj-add-row input[type=number] {
+    flex: 1; padding: 5px 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 12px; text-align: center;
+  }
+  .traj-add-btn {
+    padding: 5px 11px; border-radius: 6px; border: none;
+    background: var(--blue); color: #000; font-size: 15px; font-weight: 700; cursor: pointer;
+  }
+  .traj-bar-bg { width: 100%; height: 5px; background: var(--border); border-radius: 3px; margin-bottom: 3px; }
+  .traj-bar    { height: 100%; width: 0%; background: var(--purple); border-radius: 3px; transition: width .3s linear; }
+
   @media (max-width: 720px) {
     body { overflow: auto; }
     html, body { height: auto; }
@@ -338,6 +354,52 @@
         <div id="slowdown-status"
              style="font-size:11px;color:var(--muted);text-align:center;min-height:16px;margin-top:4px"></div>
         <button class="btn btn-stop" onclick="emergencyStop()">⬛ EMERGENCY STOP</button>
+      </div>
+
+      <!-- Trajectory -->
+      <div class="card">
+        <div class="card-title">Trajectory</div>
+
+        <table class="traj-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th style="text-align:right">RPM</th>
+              <th style="text-align:right">Duration</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="traj-tbody"></tbody>
+        </table>
+
+        <div class="traj-add-row">
+          <input type="number" id="traj-rpm" placeholder="RPM" min="0" max="30000" step="100">
+          <input type="number" id="traj-dur" placeholder="s" min="0.1" max="3600" step="0.5" style="max-width:60px">
+          <button class="traj-add-btn" onclick="trajAddWaypoint()">+</button>
+        </div>
+
+        <div id="traj-total"
+             style="font-size:11px;color:var(--muted);text-align:right;margin-bottom:5px;min-height:14px"></div>
+
+        <div id="traj-progress-block" style="display:none;margin-bottom:5px">
+          <div class="traj-bar-bg"><div id="traj-bar" class="traj-bar"></div></div>
+          <div id="traj-status-run"
+               style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;min-height:14px;margin-top:2px"></div>
+        </div>
+        <div id="traj-status-idle"
+             style="font-size:11px;color:var(--muted);min-height:14px;margin-bottom:4px"></div>
+
+        <div style="display:flex;gap:6px;margin-bottom:6px">
+          <button class="btn btn-arm"    id="traj-run-btn"  onclick="trajRun()"  style="flex:1;font-size:12px">▶ Run</button>
+          <button class="btn btn-disarm" id="traj-stop-btn" onclick="trajStop()" style="flex:1;font-size:12px;display:none">■ Stop</button>
+        </div>
+        <div style="display:flex;gap:6px">
+          <button class="btn btn-set" onclick="trajDownload()" style="flex:1;font-size:11px">⬇ Save JSON</button>
+          <label class="btn btn-set" style="flex:1;font-size:11px;cursor:pointer;text-align:center;padding:10px">
+            ⬆ Load JSON
+            <input type="file" id="traj-file" accept=".json" style="display:none" onchange="trajUpload(this)">
+          </label>
+        </div>
       </div>
 
       <!-- Live metrics -->
@@ -890,6 +952,12 @@ document.getElementById('cmd-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') sendCmd();
 });
 
+['traj-rpm','traj-dur'].forEach(id => {
+  document.getElementById(id).addEventListener('keydown', e => {
+    if (e.key === 'Enter') trajAddWaypoint();
+  });
+});
+
 // -----------------------------------------------------------------------
 // Log display
 // -----------------------------------------------------------------------
@@ -1254,6 +1322,25 @@ function connectSSE() {
         statusEl.textContent = `Error: ${data.error}`;
         statusEl.style.color = 'var(--red)';
       }
+    } else if (data.type === 'trajectory') {
+      if (data.state === 'running') {
+        if (!_trajRunning) _setTrajUI(true);
+        const pct = data.total_s > 0 ? (data.elapsed_s / data.total_s * 100) : 0;
+        _setTrajProgress(pct);
+        _setTrajStatus(
+          `Step ${data.step}/${data.total}  ·  ${data.elapsed_s}s / ${data.total_s}s  ·  ${(data.target_rpm||0).toLocaleString()} RPM`
+        );
+        // Mirror target RPM into the RPM display
+        const dispEl = document.getElementById('disp-rpm-target');
+        if (dispEl) dispEl.textContent = (data.target_rpm || 0).toLocaleString();
+      } else if (data.state === 'done') {
+        _setTrajUI(false);
+        _setTrajProgress(100);
+        _setTrajStatus(`Done — ${data.total} step${data.total !== 1 ? 's' : ''} complete`, true);
+      } else if (data.state === 'stopped') {
+        _setTrajUI(false);
+        _setTrajStatus('Stopped', true);
+      }
     }
   };
 
@@ -1408,6 +1495,126 @@ function clearCalibration() {
   fetch('/api/calibration/clear', {method: 'POST'})
     .then(() => { _calPoints = {positive: {}, negative: {}}; _renderCalTable(); })
     .catch(console.error);
+}
+
+// -----------------------------------------------------------------------
+// Trajectory
+// -----------------------------------------------------------------------
+let _trajWaypoints = [];
+let _trajRunning   = false;
+
+function trajAddWaypoint() {
+  const rpm = parseInt(document.getElementById('traj-rpm').value);
+  const dur = parseFloat(document.getElementById('traj-dur').value);
+  if (isNaN(rpm) || rpm < 0 || isNaN(dur) || dur <= 0) return;
+  _trajWaypoints.push({rpm, duration_s: dur});
+  _renderTrajTable();
+  document.getElementById('traj-rpm').value = '';
+  document.getElementById('traj-dur').value = '';
+}
+
+function trajDeleteWaypoint(i) {
+  _trajWaypoints.splice(i, 1);
+  _renderTrajTable();
+}
+
+function _renderTrajTable() {
+  const tbody = document.getElementById('traj-tbody');
+  tbody.innerHTML = '';
+  _trajWaypoints.forEach((wp, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td style="color:var(--muted)">${i + 1}</td>` +
+      `<td style="text-align:right">${wp.rpm.toLocaleString()}</td>` +
+      `<td style="text-align:right;color:var(--muted)">${wp.duration_s}s</td>` +
+      `<td style="text-align:right"><button class="log-clear" onclick="trajDeleteWaypoint(${i})">✕</button></td>`;
+    tbody.appendChild(tr);
+  });
+  const total = _trajWaypoints.reduce((s, w) => s + w.duration_s, 0);
+  document.getElementById('traj-total').textContent =
+    _trajWaypoints.length ? `${_trajWaypoints.length} step${_trajWaypoints.length > 1 ? 's' : ''} · ${total.toFixed(1)} s total` : '';
+}
+
+function _setTrajUI(running) {
+  _trajRunning = running;
+  document.getElementById('traj-run-btn').style.display  = running ? 'none' : '';
+  document.getElementById('traj-stop-btn').style.display = running ? '' : 'none';
+  document.getElementById('traj-progress-block').style.display = running ? '' : 'none';
+}
+
+function _setTrajStatus(msg, idle) {
+  const runEl  = document.getElementById('traj-status-run');
+  const idleEl = document.getElementById('traj-status-idle');
+  if (idle) {
+    if (idleEl) idleEl.textContent = msg;
+    if (runEl)  runEl.textContent  = '';
+  } else {
+    if (runEl)  runEl.textContent  = msg;
+    if (idleEl) idleEl.textContent = '';
+  }
+}
+
+function _setTrajProgress(pct) {
+  const bar = document.getElementById('traj-bar');
+  if (bar) bar.style.width = Math.min(100, Math.max(0, pct)) + '%';
+}
+
+function trajRun() {
+  if (_trajRunning || _trajWaypoints.length === 0) return;
+  // Switch to RPM mode so the RPM target display is visible
+  if (!_rpmMode) toggleRpmMode();
+  fetch('/api/trajectory/run', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({waypoints: _trajWaypoints})
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        _setTrajUI(true);
+        _setTrajProgress(0);
+        _setTrajStatus(`0 / ${d.total_s.toFixed(1)} s`);
+      } else {
+        _setTrajStatus(d.error || 'Failed to start', true);
+      }
+    })
+    .catch(console.error);
+}
+
+function trajStop() {
+  fetch('/api/trajectory/stop', {method: 'POST'}).catch(console.error);
+}
+
+function trajDownload() {
+  const blob = new Blob([JSON.stringify(_trajWaypoints, null, 2)], {type: 'application/json'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = 'trajectory.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function trajUpload(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!Array.isArray(data)) throw new Error('expected array');
+      _trajWaypoints = data.map(w => ({
+        rpm:        Math.max(0, parseInt(w.rpm)        || 0),
+        duration_s: Math.max(0.1, parseFloat(w.duration_s) || 1.0),
+      }));
+      _renderTrajTable();
+      _setTrajStatus(`Loaded ${_trajWaypoints.length} waypoints`, true);
+    } catch {
+      _setTrajStatus('Invalid JSON file', true);
+    }
+    input.value = '';
+  };
+  reader.readAsText(file);
 }
 
 // -----------------------------------------------------------------------

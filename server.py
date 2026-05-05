@@ -171,6 +171,13 @@ _pitch_buf_neg: deque = deque(maxlen=5)
 _pitch_live_pos: float | None = None
 _pitch_live_neg: float | None = None
 
+# -----------------------------------------------------------------------
+# Trajectory (programmable RPM waypoint sequence)
+# -----------------------------------------------------------------------
+_traj_lock   = threading.Lock()
+_traj_active = False
+_traj_data: list[dict] = []   # [{'rpm': int, 'duration_s': float}, ...]
+
 
 def _generate_plot(data: list[dict], path: str):
     times    = [d['time_s']       for d in data]
@@ -371,6 +378,101 @@ def _do_slowdown():
             return
 
         time.sleep(_SLOWDOWN_INTERVAL)
+
+
+def _do_trajectory():
+    global _traj_active, _rpm_enabled, _rpm_target, _rpm_current_thr
+    with _traj_lock:
+        waypoints = list(_traj_data)
+
+    if not waypoints:
+        with _traj_lock:
+            _traj_active = False
+        return
+
+    with _rpm_ctrl_lock:
+        _rpm_enabled     = True
+        if _rpm_current_thr == 0.0:
+            _rpm_current_thr = float(_RPM_MIN_THR)
+
+    total_s  = sum(w['duration_s'] for w in waypoints)
+    elapsed  = 0.0
+    prev_rpm = 0
+
+    _sse_push({'type': 'trajectory', 'state': 'running', 'step': 0,
+               'total': len(waypoints), 'elapsed_s': 0.0,
+               'total_s': total_s, 'target_rpm': 0})
+
+    for i, wp in enumerate(waypoints):
+        with _traj_lock:
+            if not _traj_active:
+                _sse_push({'type': 'trajectory', 'state': 'stopped'})
+                return
+
+        target_rpm = wp['rpm']
+        dur        = max(0.2, wp['duration_s'])
+        steps      = max(1, round(dur / 0.2))
+        step_dur   = dur / steps
+
+        for s in range(steps):
+            with _traj_lock:
+                if not _traj_active:
+                    _sse_push({'type': 'trajectory', 'state': 'stopped'})
+                    return
+
+            t_frac   = (s + 1) / steps
+            interp   = prev_rpm + (target_rpm - prev_rpm) * t_frac
+            elapsed += step_dur
+
+            with _rpm_ctrl_lock:
+                _rpm_target  = round(interp)
+                _rpm_enabled = True
+
+            _sse_push({
+                'type':       'trajectory',
+                'state':      'running',
+                'step':       i + 1,
+                'total':      len(waypoints),
+                'elapsed_s':  round(elapsed, 1),
+                'total_s':    total_s,
+                'target_rpm': round(interp),
+            })
+            time.sleep(step_dur)
+
+        prev_rpm = target_rpm
+
+    with _traj_lock:
+        _traj_active = False
+    _sse_push({'type': 'trajectory', 'state': 'done', 'total': len(waypoints)})
+
+
+@app.route('/api/trajectory/run', methods=['POST'])
+def trajectory_run():
+    global _traj_active, _traj_data
+    data      = request.get_json(force=True)
+    waypoints = data.get('waypoints', [])
+    if not waypoints:
+        return jsonify({'ok': False, 'error': 'no waypoints'}), 400
+    for wp in waypoints:
+        if 'rpm' not in wp or 'duration_s' not in wp:
+            return jsonify({'ok': False, 'error': 'each waypoint needs rpm and duration_s'}), 400
+    with _traj_lock:
+        if _traj_active:
+            return jsonify({'ok': False, 'error': 'trajectory already running'}), 400
+        _traj_data   = [{'rpm': int(w['rpm']), 'duration_s': float(w['duration_s'])}
+                        for w in waypoints]
+        _traj_active = True
+    threading.Thread(target=_do_trajectory, daemon=True).start()
+    total_s = sum(w['duration_s'] for w in _traj_data)
+    return jsonify({'ok': True, 'steps': len(_traj_data), 'total_s': total_s})
+
+
+@app.route('/api/trajectory/stop', methods=['POST'])
+def trajectory_stop():
+    global _traj_active
+    with _traj_lock:
+        _traj_active = False
+    return jsonify({'ok': True})
 
 
 @app.route('/api/motor/slowdown', methods=['POST'])

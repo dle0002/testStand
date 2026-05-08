@@ -623,7 +623,7 @@ def add_cal_point():
     pitch = float(data.get('pitch_deg', 0))
 
     THR_LOW       = 150    # DShot throttle at sweep start/end
-    THR_HIGH      = 350    # DShot throttle at sweep peak
+    THR_HIGH      = 250    # DShot throttle at sweep peak
     RAMP_DURATION = 10.0   # seconds per ramp leg
     STEP_INTERVAL = 0.2    # seconds between throttle steps
     steps = int(RAMP_DURATION / STEP_INTERVAL)

@@ -208,7 +208,8 @@ def _read_loop_hall_binary(ser: serial.Serial):
             except queue.Full:
                 pass
             break
-        except Exception:
+        except Exception as _e:
+            print(f'[serial] hall binary reader error: {_e}')
             time.sleep(0.01)
 
 
@@ -294,27 +295,26 @@ def _connect(source: str, port: str) -> bool:
             time.sleep(0.1)
             _write(ser, "LOG:1")
         elif source == 'hall':
-            # Sniff may have toggled debug to an unknown state.
-            # Wait up to 1.5 s for an ISR heartbeat; if none arrives, send 'd'
-            # to enable debug output.
             time.sleep(0.1)
             ser.reset_input_buffer()
-            deadline = time.time() + 1.5
-            got_output = False
-            while time.time() < deadline:
-                if ser.in_waiting:
-                    chunk = ser.read(ser.in_waiting).decode('utf-8', errors='replace')
-                    if 'ISR:' in chunk or 'POL:' in chunk:
-                        got_output = True
+            # Toggle raw binary streaming until the firmware confirms "raw stream ON".
+            # Handles the case where the Pico was left in binary mode by a previous
+            # scope.py session (one toggle would give "raw stream OFF"; a second fixes it).
+            for _attempt in range(3):
+                ser.write(b'r\n')
+                ser.flush()
+                resp = b''
+                t_end = time.time() + 2.0
+                while time.time() < t_end:
+                    resp += ser.read(ser.in_waiting or 1)
+                    if b'raw stream ON' in resp or b'raw stream OFF' in resp:
                         break
-                time.sleep(0.1)
-            if not got_output:
-                _write(ser, "d")  # enable debug heartbeat
-            # Switch to raw binary streaming — same as scope.py
-            ser.reset_input_buffer()
-            ser.write(b'r\n')
-            ser.flush()
-            time.sleep(0.05)
+                    time.sleep(0.05)
+                if b'raw stream ON' in resp:
+                    print('[serial] hall binary streaming ON')
+                    break
+                print(f'[serial] hall toggle attempt {_attempt+1}: got '
+                      + resp.decode('utf-8', errors='replace').strip())
             ser.reset_input_buffer()
             threading.Thread(target=_read_loop_hall_binary, args=(ser,), daemon=True).start()
         if source != 'hall':

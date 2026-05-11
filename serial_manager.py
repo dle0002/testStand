@@ -18,7 +18,7 @@ import time
 from collections import deque
 
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks, medfilt
+from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks
 import serial
 import serial.tools.list_ports
 
@@ -201,8 +201,11 @@ def _read_loop_hall_binary(ser: serial.Serial):
                 # _cal_samples_pos keeps the raw peak voltage so add_cal_point can
                 # apply its own medfilt+mean exactly as scope.py does.
                 pos_peak_hist.append(v)
-                h_arr = np.array(list(pos_peak_hist))
-                fv = float(medfilt(h_arr, min(15, len(h_arr) | 1))[-1])
+                # Running median of last min(15, n) peaks — pure Python, no numpy
+                # overhead per peak. Equivalent to medfilt(arr, kernel)[-1].
+                win = list(pos_peak_hist)
+                n_w = min(15, len(win) | 1)
+                fv  = sorted(win[-n_w:])[n_w // 2]
                 if prev_pos_abs is not None:
                     interval_s = (abs_idx - prev_pos_abs) / _HALL_FS
                     if 0 < interval_s < 2.0:
@@ -219,12 +222,10 @@ def _read_loop_hall_binary(ser: serial.Serial):
                     if _cal_active:
                         _cal_samples_pos.append(v)
                     rpm_now = _state['hall']['rpm']
-                line = f'POL:+ V:{fv:.4f} RPM:{rpm_now}'
-                _log_buffer['hall'].append(line)
-                try:
-                    _log_queue.put_nowait(('hall', line))
-                except queue.Full:
-                    pass
+                # Keep log buffer for REST /api/logs/hall but do NOT push to
+                # _log_queue — 50–100 peak events/s would flood the SSE stream
+                # and saturate the browser. Hall state arrives via the 1 s status push.
+                _log_buffer['hall'].append(f'POL:+ V:{fv:.4f} RPM:{rpm_now}')
 
             for i in neg_idx:
                 abs_idx = sample_count - _HALL_WINDOW_N + int(i)
@@ -232,8 +233,9 @@ def _read_loop_hall_binary(ser: serial.Serial):
                     continue   # already processed this peak
                 v = float(filt_window[i])
                 neg_peak_hist.append(v)
-                h_arr = np.array(list(neg_peak_hist))
-                fv = float(medfilt(h_arr, min(15, len(h_arr) | 1))[-1])
+                win = list(neg_peak_hist)
+                n_w = min(15, len(win) | 1)
+                fv  = sorted(win[-n_w:])[n_w // 2]
                 last_neg_abs  = abs_idx
                 last_peak_abs = sample_count
                 with _lock:
@@ -241,12 +243,7 @@ def _read_loop_hall_binary(ser: serial.Serial):
                     if _cal_active:
                         _cal_samples_neg.append(v)
                     rpm_now = _state['hall']['rpm']
-                line = f'POL:- V:{fv:.4f} RPM:{rpm_now}'
-                _log_buffer['hall'].append(line)
-                try:
-                    _log_queue.put_nowait(('hall', line))
-                except queue.Full:
-                    pass
+                _log_buffer['hall'].append(f'POL:- V:{fv:.4f} RPM:{rpm_now}')
 
             # Idle timeout: no peaks for 0.5 s worth of samples → RPM = 0
             if (sample_count - last_peak_abs) > int(_HALL_FS * 0.5):

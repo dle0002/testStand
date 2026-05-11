@@ -17,6 +17,8 @@ import threading
 import time
 from collections import deque
 
+import numpy as np
+from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks
 import serial
 import serial.tools.list_ports
 
@@ -29,6 +31,18 @@ BAUD          = 115200
 # ESC DShot throttle range
 _ESC_THR_MIN = 47
 _ESC_THR_MAX = 1047
+
+# -----------------------------------------------------------------------
+# Hall sensor DSP constants — identical to scope.py so calibration domains match
+_HALL_FS       = 50_000
+_HALL_ADC_REF  = 3.3
+_HALL_ADC_MAX  = 4095
+_HALL_V_MID    = _HALL_ADC_REF / 2        # 1.65 V
+_HALL_LPF_HZ   = 2_000
+_HALL_LPF_ORD  = 4
+_HALL_WINDOW_N = int(_HALL_FS * 0.200)    # 10 000 samples = 200 ms
+_hall_sos      = butter(_HALL_LPF_ORD, _HALL_LPF_HZ / (_HALL_FS / 2.0),
+                        btype='low', output='sos')
 
 # -----------------------------------------------------------------------
 _HALL_RE      = re.compile(r'POL:([+-]) V:([\d.]+) RPM:(\d+)')
@@ -82,6 +96,120 @@ _lock = threading.Lock()
 def _write(ser: serial.Serial, cmd: str):
     """Write a command with CRLF line ending (required by ESP32 firmware)."""
     ser.write((cmd + '\r\n').encode())
+
+
+def _detect_hall_peaks(filt: np.ndarray):
+    """Identical to scope.py detect_peaks — adaptive prominence, no hardcoded thresholds."""
+    mid      = float(np.median(filt))
+    pos_prom = (float(np.max(filt)) - mid) * 0.5
+    neg_prom = (mid - float(np.min(filt))) * 0.5
+    pos_idx, _ = find_peaks( filt, prominence=pos_prom, height=mid,  distance=50)
+    neg_idx, _ = find_peaks(-filt, prominence=neg_prom, height=-mid, distance=50)
+    return pos_idx, neg_idx
+
+
+def _read_loop_hall_binary(ser: serial.Serial):
+    """Binary ADC stream reader — same pipeline as scope.py.
+
+    Replaces the text-mode _read_loop for the hall source so that
+    pos_voltage / neg_voltage are in the identical centered+LPF-filtered
+    domain used when calibration.json was created.
+    """
+    zi        = sosfilt_zi(_hall_sos).astype(np.float64) * 0.0
+    raw_buf   = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
+    filt_buf  = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
+    head      = 0
+    leftover  = b''
+
+    last_pos_t   = 0.0   # monotonic time of the most-recently recorded positive peak
+    last_neg_t   = 0.0
+    prev_pos_t   = None  # used for RPM interval calculation
+    prev_neg_t   = None
+    last_peak_t  = time.monotonic()  # for idle-timeout RPM=0
+
+    while True:
+        try:
+            data = ser.read(4096)
+            if not data:
+                continue
+
+            data     = leftover + data
+            n        = len(data) // 2
+            if n == 0:
+                leftover = data
+                continue
+            leftover = data[n * 2:]
+
+            samples = np.frombuffer(data[:n * 2], dtype='<u2').astype(np.float32)
+            volts   = samples * (_HALL_ADC_REF / _HALL_ADC_MAX) - _HALL_V_MID
+
+            filt, zi = sosfilt(_hall_sos, volts.astype(np.float64), zi=zi)
+            filt     = filt.astype(np.float32)
+
+            m   = len(volts)
+            idx = np.arange(head, head + m, dtype=np.int64) % _HALL_WINDOW_N
+            raw_buf [idx] = volts
+            filt_buf[idx] = filt
+            head = int((head + m) % _HALL_WINDOW_N)
+
+            # Reconstruct ordered 200 ms window, oldest first
+            filt_window = np.concatenate([filt_buf[head:], filt_buf[:head]])
+
+            pos_idx, neg_idx = _detect_hall_peaks(filt_window)
+
+            now = time.monotonic()
+
+            # Process positive peaks
+            for i in pos_idx:
+                t = now - (_HALL_WINDOW_N - 1 - int(i)) / _HALL_FS
+                if t > last_pos_t:
+                    v = float(filt_window[i])
+                    if prev_pos_t is not None:
+                        interval = t - prev_pos_t
+                        if 0 < interval < 2.0:
+                            with _lock:
+                                _state['hall']['rpm'] = _rpm_median(int(round(60.0 / interval)))
+                    prev_pos_t  = t
+                    last_pos_t  = t
+                    last_peak_t = now
+                    with _lock:
+                        _state['hall']['pos_voltage'] = round(v, 4)
+                        _state['hall']['voltage']     = round(v, 4)
+                        _state['hall']['polarity']    = '+'
+                        if _cal_active:
+                            _cal_samples_pos.append(v)
+
+            # Process negative peaks
+            for i in neg_idx:
+                t = now - (_HALL_WINDOW_N - 1 - int(i)) / _HALL_FS
+                if t > last_neg_t:
+                    v = float(filt_window[i])
+                    if prev_neg_t is not None:
+                        interval = t - prev_neg_t
+                    prev_neg_t  = t
+                    last_neg_t  = t
+                    last_peak_t = now
+                    with _lock:
+                        _state['hall']['neg_voltage'] = round(v, 4)
+                        if _cal_active:
+                            _cal_samples_neg.append(v)
+
+            # Idle timeout — no peaks for 0.5 s → RPM = 0
+            if now - last_peak_t > 0.5:
+                _rpm_window.clear()
+                with _lock:
+                    _state['hall']['rpm'] = 0
+
+        except serial.SerialException:
+            with _lock:
+                _state['hall']['connected'] = False
+            try:
+                _log_queue.put_nowait(('hall', '[disconnected: hall]'))
+            except queue.Full:
+                pass
+            break
+        except Exception:
+            time.sleep(0.01)
 
 
 
@@ -182,7 +310,15 @@ def _connect(source: str, port: str) -> bool:
                 time.sleep(0.1)
             if not got_output:
                 _write(ser, "d")  # enable debug heartbeat
-        threading.Thread(target=_read_loop, args=(source, ser), daemon=True).start()
+            # Switch to raw binary streaming — same as scope.py
+            ser.reset_input_buffer()
+            ser.write(b'r\n')
+            ser.flush()
+            time.sleep(0.05)
+            ser.reset_input_buffer()
+            threading.Thread(target=_read_loop_hall_binary, args=(ser,), daemon=True).start()
+        if source != 'hall':
+            threading.Thread(target=_read_loop, args=(source, ser), daemon=True).start()
         print(f"[serial] {source} connected on {port}")
         return True
     except Exception as e:

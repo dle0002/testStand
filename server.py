@@ -23,6 +23,9 @@ import time
 from collections import deque
 from datetime import datetime
 
+import numpy as np
+from scipy.signal import medfilt
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -655,8 +658,10 @@ def add_cal_point():
                         'error': f'no samples for {", ".join(missing)} — check hall sensor'})
 
     key     = f'{round(pitch, 2):.2f}'
-    avg_pos = round(sum(pos_samples) / len(pos_samples), 4)
-    avg_neg = round(sum(neg_samples) / len(neg_samples), 4)
+    avg_pos = round(float(np.mean(medfilt(np.array(pos_samples),
+                                          min(15, len(pos_samples) | 1)))), 4)
+    avg_neg = round(float(np.mean(medfilt(np.array(neg_samples),
+                                          min(15, len(neg_samples) | 1)))), 4)
     with _cal_srv_lock:
         _calibration['positive'][key] = avg_pos
         _calibration['negative'][key] = avg_neg

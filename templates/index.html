@@ -1019,11 +1019,29 @@ function applyStatus(data) {
   setEl('m-mah',      mah);
   if (h.pos_voltage != null) {
     setEl('m-hall-pos-v', h.pos_voltage.toFixed(3) + ' V');
-    if (_calMode) setEl('m-pitch-pos', _interpolatePitch(h.pos_voltage, 'positive'));
+    if (_calMode) {
+      const raw = _interpolatePitchNum(h.pos_voltage, 'positive');
+      if (raw !== null) {
+        const filt = _medianFilter(_pitchBufPos, raw, _pitchFilterW);
+        setEl('m-pitch-pos', filt.toFixed(1) + '°');
+        if (_pitchChart) _pitchChart.push(0, filt);
+      } else {
+        setEl('m-pitch-pos', '—°');
+      }
+    }
   }
   if (h.neg_voltage != null) {
     setEl('m-hall-neg-v', h.neg_voltage.toFixed(3) + ' V');
-    if (_calMode) setEl('m-pitch-neg', _interpolatePitch(h.neg_voltage, 'negative'));
+    if (_calMode) {
+      const raw = _interpolatePitchNum(h.neg_voltage, 'negative');
+      if (raw !== null) {
+        const filt = _medianFilter(_pitchBufNeg, raw, _pitchFilterW);
+        setEl('m-pitch-neg', filt.toFixed(1) + '°');
+        if (_pitchChart) _pitchChart.push(1, filt);
+      } else {
+        setEl('m-pitch-neg', '—°');
+      }
+    }
   }
   setEl('bar-rpm',      rpm);
   setEl('bar-esc-rpm',  escRpm);

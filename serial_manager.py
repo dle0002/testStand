@@ -125,6 +125,8 @@ def _read_loop_hall_binary(ser: serial.Serial):
     head         = 0
     leftover     = b''
     sample_count = 0   # total samples received — never wraps (Python int)
+    _first_batch = True
+    _bad_runs    = 0   # consecutive batches with out-of-range samples
 
     # Absolute sample index of the last peak recorded per polarity
     last_pos_abs  = -1
@@ -148,6 +150,24 @@ def _read_loop_hall_binary(ser: serial.Serial):
             leftover = data[n * 2:]
 
             samples = np.frombuffer(data[:n * 2], dtype='<u2').astype(np.float32)
+
+            # 12-bit ADC: valid range 0-4095. Values above that mean the stream
+            # is misaligned or the firmware isn't in binary mode yet.
+            if np.max(samples) > 4095:
+                _bad_runs += 1
+                if _bad_runs % 20 == 1:
+                    print(f'[serial] hall: invalid ADC values '
+                          f'(max={int(np.max(samples))}, run={_bad_runs}) — resyncing')
+                # Discard 1 byte to try a different alignment
+                leftover = data[1:]
+                continue
+            _bad_runs = 0
+
+            if _first_batch:
+                print(f'[serial] hall binary reader: first valid batch '
+                      f'n={n} min={int(np.min(samples))} max={int(np.max(samples))}')
+                _first_batch = False
+
             volts   = samples * (_HALL_ADC_REF / _HALL_ADC_MAX) - _HALL_V_MID
 
             filt, zi = sosfilt(_hall_sos, volts.astype(np.float64), zi=zi)

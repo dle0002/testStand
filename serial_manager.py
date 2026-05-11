@@ -365,15 +365,19 @@ def _sniff_port(port: str) -> str | None:
     """Poke a port with device-specific wake commands then identify by response.
 
     LOG:1  — starts output on ESC and load cell (hall ignores it)
-    d      — toggles hall debug heartbeat; hall replies 'debug ON/OFF' or
-             starts emitting 'ISR:' lines; ESC/loadcell ignore it
+    r      — toggles hall raw-stream; firmware ALWAYS replies 'raw stream ON/OFF'
+             regardless of current streaming state or debug mode, so this works
+             even when the Pico was left in binary-stream mode from a previous
+             scope.py or server session (unlike 'd', whose reply is suppressed
+             while g_raw_stream is true).
+             ESC and load cell ignore 'r'.
     """
     try:
         ser = serial.Serial(port, BAUD, timeout=1)
         time.sleep(0.3)
         ser.reset_input_buffer()
         ser.write(b'LOG:1\r\n')   # wake ESC / load cell
-        ser.write(b'd\r\n')       # wake hall debug heartbeat
+        ser.write(b'r\r\n')       # toggle hall raw stream — always gets a text reply
         deadline = time.time() + 4
         data = b''
         while time.time() < deadline:
@@ -385,7 +389,7 @@ def _sniff_port(port: str) -> str | None:
         text = data.decode('utf-8', errors='replace')
         if ('hall_sampler' in text or 'sampling at' in text
                 or 'POL:' in text or 'ISR:' in text
-                or 'debug ON' in text or 'debug OFF' in text):
+                or 'raw stream ON' in text or 'raw stream OFF' in text):
             return 'hall'
         if 'raw:' in text or 'CAL' in text or 'TARE' in text or 'not calibrated' in text:
             return 'loadcell'

@@ -45,9 +45,6 @@ _hall_sos      = butter(_HALL_LPF_ORD, _HALL_LPF_HZ / (_HALL_FS / 2.0),
                         btype='low', output='sos')
 
 # -----------------------------------------------------------------------
-_HALL_RE      = re.compile(r'POL:([+-]) V:([\d.]+) RPM:(\d+)')
-_RPM_ZERO_RE  = re.compile(r'RPM:0')
-
 # Median filter window for hall RPM — filters single-sample spikes
 _RPM_WINDOW_SIZE = 5
 _rpm_window: deque = deque(maxlen=_RPM_WINDOW_SIZE)
@@ -206,6 +203,13 @@ def _read_loop_hall_binary(ser: serial.Serial):
                     _state['hall']['polarity']    = '+'
                     if _cal_active:
                         _cal_samples_pos.append(v)
+                    rpm_now = _state['hall']['rpm']
+                line = f'POL:+ V:{v:.4f} RPM:{rpm_now}'
+                _log_buffer['hall'].append(line)
+                try:
+                    _log_queue.put_nowait(('hall', line))
+                except queue.Full:
+                    pass
 
             for i in neg_idx:
                 abs_idx = sample_count - _HALL_WINDOW_N + int(i)
@@ -218,6 +222,13 @@ def _read_loop_hall_binary(ser: serial.Serial):
                     _state['hall']['neg_voltage'] = round(v, 4)
                     if _cal_active:
                         _cal_samples_neg.append(v)
+                    rpm_now = _state['hall']['rpm']
+                line = f'POL:- V:{v:.4f} RPM:{rpm_now}'
+                _log_buffer['hall'].append(line)
+                try:
+                    _log_queue.put_nowait(('hall', line))
+                except queue.Full:
+                    pass
 
             # Idle timeout: no peaks for 0.5 s worth of samples → RPM = 0
             if (sample_count - last_peak_abs) > int(_HALL_FS * 0.5):
@@ -254,29 +265,7 @@ def _read_loop(source: str, ser: serial.Serial):
             except queue.Full:
                 pass
 
-            if source == 'hall':
-                m = _HALL_RE.search(line)
-                if m:
-                    polarity = m.group(1)
-                    v = float(m.group(2))
-                    with _lock:
-                        _state['hall']['rpm']      = _rpm_median(int(m.group(3)))
-                        _state['hall']['voltage']  = v
-                        _state['hall']['polarity'] = polarity
-                        if polarity == '+':
-                            _state['hall']['pos_voltage'] = v
-                            if _cal_active:
-                                _cal_samples_pos.append(v)
-                        else:
-                            _state['hall']['neg_voltage'] = v
-                            if _cal_active:
-                                _cal_samples_neg.append(v)
-                elif _RPM_ZERO_RE.search(line):
-                    _rpm_window.clear()
-                    with _lock:
-                        _state['hall']['rpm'] = 0
-
-            elif source == 'loadcell':
+            if source == 'loadcell':
                 m = _LOADCELL_RE.match(line)
                 if m:
                     with _lock:

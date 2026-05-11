@@ -1074,7 +1074,7 @@ function applyStatus(data) {
 // Live metric parsing from log lines
 // (updates cards immediately as lines arrive, independent of status poll)
 // -----------------------------------------------------------------------
-const _HALL_RE     = /POL:([+-]) V:([\d.]+) RPM:(\d+)/;
+const _HALL_RE     = /POL:([+-]) V:(-?[\d.]+) RPM:(\d+)/;
 const _RPM_ZERO_RE = /RPM:0/;
 const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
 const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;

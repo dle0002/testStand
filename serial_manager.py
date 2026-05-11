@@ -321,25 +321,28 @@ def _connect(source: str, port: str) -> bool:
             _write(ser, "LOG:1")
         elif source == 'hall':
             time.sleep(0.1)
-            ser.reset_input_buffer()
-            # Toggle raw binary streaming until the firmware confirms "raw stream ON".
-            # Handles the case where the Pico was left in binary mode by a previous
-            # scope.py session (one toggle would give "raw stream OFF"; a second fixes it).
+            # Identical handshake to scope.py — keep toggling until "raw stream ON"
+            # is confirmed.  Handles a Pico left in binary mode by a previous
+            # scope.py session (first toggle → OFF, second → ON).
             for _attempt in range(3):
+                ser.reset_input_buffer()
                 ser.write(b'r\n')
                 ser.flush()
-                resp = b''
-                t_end = time.time() + 2.0
-                while time.time() < t_end:
-                    resp += ser.read(ser.in_waiting or 1)
-                    if b'raw stream ON' in resp or b'raw stream OFF' in resp:
+                resp, deadline = b'', time.time() + 3.0
+                while time.time() < deadline:
+                    resp += ser.read(256)
+                    if b'raw stream ON' in resp:
                         break
+                    if b'raw stream OFF' in resp:
+                        break   # need another toggle
                     time.sleep(0.05)
                 if b'raw stream ON' in resp:
                     print('[serial] hall binary streaming ON')
                     break
-                print(f'[serial] hall toggle attempt {_attempt+1}: got '
+                print(f'[serial] hall toggle attempt {_attempt + 1}: '
                       + resp.decode('utf-8', errors='replace').strip())
+            else:
+                print('[serial] hall WARNING: could not confirm binary mode')
             ser.reset_input_buffer()
             threading.Thread(target=_read_loop_hall_binary, args=(ser,), daemon=True).start()
         if source != 'hall':
@@ -495,14 +498,15 @@ def set_motor_speed(speed: int):
 
 
 def sync_all():
-    """Send the same SYNC epoch to every connected device back-to-back.
-    All three devices must receive the same value so their timestamps are
-    comparable in the CSV/plot.  Called after all devices finish connecting.
+    """Send the same SYNC epoch to ESC and loadcell.
+    Hall is excluded: it runs in binary streaming mode and the firmware would
+    inject the text response into the ADC sample stream, corrupting it.
     """
     epoch_ms = int(time.time() * 1000)
     cmd = f"SYNC:{epoch_ms}"
     with _lock:
-        serials = {s: ser for s, ser in _serials.items()}
+        serials = {s: ser for s, ser in _serials.items()
+                   if s != 'hall'}          # hall excluded — binary mode
     synced = []
     for source, ser in serials.items():
         try:

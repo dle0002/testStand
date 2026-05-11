@@ -18,7 +18,7 @@ import time
 from collections import deque
 
 import numpy as np
-from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks
+from scipy.signal import butter, sosfilt, sosfilt_zi, find_peaks, medfilt
 import serial
 import serial.tools.list_ports
 
@@ -125,6 +125,14 @@ def _read_loop_hall_binary(ser: serial.Serial):
     _first_batch = True
     _bad_runs    = 0   # consecutive batches with out-of-range samples
 
+    # Rolling peak-voltage history — same smoothing as scope.py trend line:
+    # medfilt(history, min(15, n|1))[-1] gives the median-filtered latest value,
+    # placing pos_voltage/neg_voltage in the same domain used when calibration.json
+    # was created (scope.py averages mean(medfilt(peaks_in_10s))).
+    _PEAK_HIST = 30   # keeps ≥15 samples for full kernel once motor is spinning
+    pos_peak_hist: deque = deque(maxlen=_PEAK_HIST)
+    neg_peak_hist: deque = deque(maxlen=_PEAK_HIST)
+
     # Absolute sample index of the last peak recorded per polarity
     last_pos_abs  = -1
     last_neg_abs  = -1
@@ -188,6 +196,13 @@ def _read_loop_hall_binary(ser: serial.Serial):
                 if abs_idx <= last_pos_abs:
                     continue   # already processed this peak
                 v = float(filt_window[i])
+                # Accumulate in history; compute medfilt[-1] to match scope.py
+                # trend-line domain (the same domain used to build calibration.json).
+                # _cal_samples_pos keeps the raw peak voltage so add_cal_point can
+                # apply its own medfilt+mean exactly as scope.py does.
+                pos_peak_hist.append(v)
+                h_arr = np.array(list(pos_peak_hist))
+                fv = float(medfilt(h_arr, min(15, len(h_arr) | 1))[-1])
                 if prev_pos_abs is not None:
                     interval_s = (abs_idx - prev_pos_abs) / _HALL_FS
                     if 0 < interval_s < 2.0:
@@ -198,13 +213,13 @@ def _read_loop_hall_binary(ser: serial.Serial):
                 last_pos_abs  = abs_idx
                 last_peak_abs = sample_count
                 with _lock:
-                    _state['hall']['pos_voltage'] = round(v, 4)
-                    _state['hall']['voltage']     = round(v, 4)
+                    _state['hall']['pos_voltage'] = round(fv, 4)
+                    _state['hall']['voltage']     = round(fv, 4)
                     _state['hall']['polarity']    = '+'
                     if _cal_active:
                         _cal_samples_pos.append(v)
                     rpm_now = _state['hall']['rpm']
-                line = f'POL:+ V:{v:.4f} RPM:{rpm_now}'
+                line = f'POL:+ V:{fv:.4f} RPM:{rpm_now}'
                 _log_buffer['hall'].append(line)
                 try:
                     _log_queue.put_nowait(('hall', line))
@@ -216,14 +231,17 @@ def _read_loop_hall_binary(ser: serial.Serial):
                 if abs_idx <= last_neg_abs:
                     continue   # already processed this peak
                 v = float(filt_window[i])
+                neg_peak_hist.append(v)
+                h_arr = np.array(list(neg_peak_hist))
+                fv = float(medfilt(h_arr, min(15, len(h_arr) | 1))[-1])
                 last_neg_abs  = abs_idx
                 last_peak_abs = sample_count
                 with _lock:
-                    _state['hall']['neg_voltage'] = round(v, 4)
+                    _state['hall']['neg_voltage'] = round(fv, 4)
                     if _cal_active:
                         _cal_samples_neg.append(v)
                     rpm_now = _state['hall']['rpm']
-                line = f'POL:- V:{v:.4f} RPM:{rpm_now}'
+                line = f'POL:- V:{fv:.4f} RPM:{rpm_now}'
                 _log_buffer['hall'].append(line)
                 try:
                     _log_queue.put_nowait(('hall', line))

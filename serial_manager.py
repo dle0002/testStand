@@ -114,18 +114,25 @@ def _read_loop_hall_binary(ser: serial.Serial):
     Replaces the text-mode _read_loop for the hall source so that
     pos_voltage / neg_voltage are in the identical centered+LPF-filtered
     domain used when calibration.json was created.
-    """
-    zi        = sosfilt_zi(_hall_sos).astype(np.float64) * 0.0
-    raw_buf   = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
-    filt_buf  = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
-    head      = 0
-    leftover  = b''
 
-    last_pos_t   = 0.0   # monotonic time of the most-recently recorded positive peak
-    last_neg_t   = 0.0
-    prev_pos_t   = None  # used for RPM interval calculation
-    prev_neg_t   = None
-    last_peak_t  = time.monotonic()  # for idle-timeout RPM=0
+    Peaks are deduplicated by absolute sample index (not wall-clock time) so
+    the same peak in the sliding window is never processed twice across loop
+    iterations.
+    """
+    zi           = sosfilt_zi(_hall_sos).astype(np.float64) * 0.0
+    raw_buf      = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
+    filt_buf     = np.zeros(_HALL_WINDOW_N, dtype=np.float32)
+    head         = 0
+    leftover     = b''
+    sample_count = 0   # total samples received — never wraps (Python int)
+
+    # Absolute sample index of the last peak recorded per polarity
+    last_pos_abs  = -1
+    last_neg_abs  = -1
+    # Previous positive peak index — used to compute RPM interval
+    prev_pos_abs  = None
+    # For idle-timeout: sample index of the most recent peak of either polarity
+    last_peak_abs = 0
 
     while True:
         try:
@@ -150,52 +157,50 @@ def _read_loop_hall_binary(ser: serial.Serial):
             idx = np.arange(head, head + m, dtype=np.int64) % _HALL_WINDOW_N
             raw_buf [idx] = volts
             filt_buf[idx] = filt
-            head = int((head + m) % _HALL_WINDOW_N)
+            head          = int((head + m) % _HALL_WINDOW_N)
+            sample_count += m
 
-            # Reconstruct ordered 200 ms window, oldest first
+            # Ordered 200 ms window, oldest first.
+            # Ordered index i → absolute sample index = sample_count - WINDOW_N + i
             filt_window = np.concatenate([filt_buf[head:], filt_buf[:head]])
 
             pos_idx, neg_idx = _detect_hall_peaks(filt_window)
 
-            now = time.monotonic()
-
-            # Process positive peaks
             for i in pos_idx:
-                t = now - (_HALL_WINDOW_N - 1 - int(i)) / _HALL_FS
-                if t > last_pos_t:
-                    v = float(filt_window[i])
-                    if prev_pos_t is not None:
-                        interval = t - prev_pos_t
-                        if 0 < interval < 2.0:
-                            with _lock:
-                                _state['hall']['rpm'] = _rpm_median(int(round(60.0 / interval)))
-                    prev_pos_t  = t
-                    last_pos_t  = t
-                    last_peak_t = now
-                    with _lock:
-                        _state['hall']['pos_voltage'] = round(v, 4)
-                        _state['hall']['voltage']     = round(v, 4)
-                        _state['hall']['polarity']    = '+'
-                        if _cal_active:
-                            _cal_samples_pos.append(v)
+                abs_idx = sample_count - _HALL_WINDOW_N + int(i)
+                if abs_idx <= last_pos_abs:
+                    continue   # already processed this peak
+                v = float(filt_window[i])
+                if prev_pos_abs is not None:
+                    interval_s = (abs_idx - prev_pos_abs) / _HALL_FS
+                    if 0 < interval_s < 2.0:
+                        with _lock:
+                            _state['hall']['rpm'] = _rpm_median(
+                                int(round(60.0 / interval_s)))
+                prev_pos_abs  = abs_idx
+                last_pos_abs  = abs_idx
+                last_peak_abs = sample_count
+                with _lock:
+                    _state['hall']['pos_voltage'] = round(v, 4)
+                    _state['hall']['voltage']     = round(v, 4)
+                    _state['hall']['polarity']    = '+'
+                    if _cal_active:
+                        _cal_samples_pos.append(v)
 
-            # Process negative peaks
             for i in neg_idx:
-                t = now - (_HALL_WINDOW_N - 1 - int(i)) / _HALL_FS
-                if t > last_neg_t:
-                    v = float(filt_window[i])
-                    if prev_neg_t is not None:
-                        interval = t - prev_neg_t
-                    prev_neg_t  = t
-                    last_neg_t  = t
-                    last_peak_t = now
-                    with _lock:
-                        _state['hall']['neg_voltage'] = round(v, 4)
-                        if _cal_active:
-                            _cal_samples_neg.append(v)
+                abs_idx = sample_count - _HALL_WINDOW_N + int(i)
+                if abs_idx <= last_neg_abs:
+                    continue   # already processed this peak
+                v = float(filt_window[i])
+                last_neg_abs  = abs_idx
+                last_peak_abs = sample_count
+                with _lock:
+                    _state['hall']['neg_voltage'] = round(v, 4)
+                    if _cal_active:
+                        _cal_samples_neg.append(v)
 
-            # Idle timeout — no peaks for 0.5 s → RPM = 0
-            if now - last_peak_t > 0.5:
+            # Idle timeout: no peaks for 0.5 s worth of samples → RPM = 0
+            if (sample_count - last_peak_abs) > int(_HALL_FS * 0.5):
                 _rpm_window.clear()
                 with _lock:
                     _state['hall']['rpm'] = 0

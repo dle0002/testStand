@@ -614,6 +614,14 @@
       </div>
     </div>
     <div class="modal-body">
+      <div id="plot-name-section" style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+        <label style="font-size:12px;color:var(--muted);white-space:nowrap">Save as</label>
+        <input type="text" id="plot-name-input"
+               style="flex:1;padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:12px;font-family:inherit"
+               placeholder="default name kept if unchanged">
+        <button class="btn btn-set" id="plot-name-btn" onclick="savePlotName()"
+                style="flex:0;padding:6px 14px;font-size:12px">Save</button>
+      </div>
       <div id="plot-loading" style="text-align:center;padding:40px;color:var(--muted)">Generating plot…</div>
       <img id="plot-img" src="" alt="Recording plot" style="display:none">
     </div>
@@ -697,6 +705,9 @@ function stopRecording() {
       if (d.ok) {
         document.getElementById('rec-status').textContent =
           `Saved ${d.points} pts — generating plot…`;
+        _pendingStem = null;
+        const nameInput = document.getElementById('plot-name-input');
+        if (nameInput) nameInput.value = '';
         // Modal shown when SSE plot_ready arrives
         openPlotModal(null, null);
       } else {
@@ -709,6 +720,34 @@ function stopRecording() {
 // -----------------------------------------------------------------------
 // Plot modal
 // -----------------------------------------------------------------------
+let _pendingStem = null;
+
+function savePlotName() {
+  const input = document.getElementById('plot-name-input');
+  const btn   = document.getElementById('plot-name-btn');
+  const name  = (input.value || '').trim();
+  if (!name || !_pendingStem) return;
+
+  fetch('/api/recording/rename', {
+    method:  'POST',
+    headers: {'Content-Type': 'application/json'},
+    body:    JSON.stringify({old_stem: _pendingStem, new_name: name})
+  })
+    .then(r => r.json())
+    .then(d => {
+      if (d.ok) {
+        _pendingStem = name;
+        const dl = document.getElementById('dl-csv');
+        dl.href     = d.csv;
+        dl.download = d.csv.split('/').pop();
+        const img = document.getElementById('plot-img');
+        if (img.style.display !== 'none') img.src = d.plot + '?t=' + Date.now();
+        if (btn) { btn.textContent = 'Saved!'; setTimeout(() => { btn.textContent = 'Save'; }, 1500); }
+      }
+    })
+    .catch(console.error);
+}
+
 function openPlotModal(plotUrl, csvUrl) {
   const modal = document.getElementById('plot-modal');
   modal.classList.add('open');
@@ -950,6 +989,10 @@ function sendCmd() {
 
 document.getElementById('cmd-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') sendCmd();
+});
+
+document.getElementById('plot-name-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') savePlotName();
 });
 
 ['traj-rpm','traj-dur'].forEach(id => {
@@ -1306,6 +1349,11 @@ function connectSSE() {
         `Recording — ${data.points} pts, ${data.duration}s`;
       document.getElementById('rec-status').textContent =
         `Saved ${data.points} pts (${data.duration}s)`;
+      if (data.stem) {
+        _pendingStem = data.stem;
+        const nameInput = document.getElementById('plot-name-input');
+        if (nameInput && !nameInput.value) nameInput.value = `recording_${data.stem}`;
+      }
       openPlotModal(data.plot, data.csv);
     } else if (data.type === 'recording') {
       if (data.state === 'started' && data.cal_mode && !_calMode) {

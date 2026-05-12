@@ -2,37 +2,35 @@
 """
 compare_plot.py — Multi-CSV comparison plotter.
 
-Load any number of CSVs (theoretical performance + test-stand recordings),
-add optional derived columns, then interactively build overlay plots by
-picking X and Y columns from any file.
+Interactive series-building workflow
+--------------------------------------
+  For each series you want on the plot:
+    1.  "Add a series?" → y
+    2.  Enter the CSV file path
+        - New file → asked for label, optional row filter, optional derived columns
+        - Already loaded path → reused as-is (no re-setup)
+    3.  Pick X column
+    4.  Pick Y column
+    5.  Enter a series label (or accept default)
+    6.  Repeat from 1 until you enter  n
+  Then choose smoothing + grouping and the plot appears.
 
-Usage
------
-    python compare_plot.py --files FILE1.csv FILE2.csv ...
-        [--labels "Theory" "Test run 1"]
-        [--smooth none|bin|sigma|lowess]
+Optional pre-loading
+----------------------
+    python compare_plot.py --files FILE1.csv FILE2.csv [--labels "A" "B"]
 
-Typical workflow
-----------------
-    # 1. Generate theoretical CSV from blade design
-    python ../Fusion\ Scripts/blade_evaluator.py objects/prop_X/ExportedParameters.csv --vinf 0
+Derived column syntax  (at the  derive>  prompt)
+-------------------------------------------------
+    fi.new_col = expression   (fi = file index shown in brackets)
+    Example: 1.T_N = 1.weight_g * 9.81 / 1000
+    Example: 1.P_W = 1.voltage_v * 1.current_a
+    Cross-file: 0.RPM_k = 0.RPM / 1000
 
-    # 2. Compare with a test-stand recording
-    python compare_plot.py \\
-        --files "../Fusion Scripts/objects/prop_X/prop_X_theoretical.csv" \\
-                "recordings/recording_20260505_154110.csv" \\
-        --labels "Theory (V_inf=0)" "Bench test"
-
-Derived column examples (enter at the prompt)
+Row filter syntax  (at the  filter>  prompt)
 ----------------------------------------------
-    1.T_N = 1.weight_g * 9.81 / 1000      # grams → Newtons
-    1.P_W = 1.voltage_v * 1.current_a     # electrical power
-    0.RPM_krpm = 0.RPM / 1000             # RPM → kRPM
-
-Row filter examples (pandas query syntax)
-------------------------------------------
-    0: V_inf_ms == 0        # hover-only rows from theoretical file
-    1: throttle > 200       # exclude low-throttle noise
+    pandas query string for this file's columns, e.g.:
+        throttle > 200
+        time_s > 5 and time_s < 60
 """
 
 import argparse
@@ -46,7 +44,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import zscore
 
-# ── smoothing (shared with plot_xy.py) ───────────────────────────────────────
+
+# ── smoothing ────────────────────────────────────────────────────────────────
 
 def apply_filter(x, y, method):
     if method == "none":
@@ -54,7 +53,6 @@ def apply_filter(x, y, method):
 
     df_tmp = pd.DataFrame({"x": x, "y": y}).dropna()
     x, y = df_tmp["x"], df_tmp["y"]
-
     if len(x) == 0:
         return x, y
 
@@ -91,7 +89,7 @@ def apply_filter(x, y, method):
     return x, y
 
 
-# ── interactive helpers ───────────────────────────────────────────────────────
+# ── prompts ───────────────────────────────────────────────────────────────────
 
 def _ask(prompt, options):
     opts = "/".join(options)
@@ -102,52 +100,13 @@ def _ask(prompt, options):
         print(f"  Please enter one of: {opts}")
 
 
-def print_columns(dfs, labels):
-    """Print a numbered index of all columns across all loaded files."""
-    print()
-    idx = 0
-    for fi, (df, label) in enumerate(zip(dfs, labels)):
-        print(f"  File {fi}: {label}  ({len(df)} rows)")
-        for col in df.columns:
-            print(f"    [{idx:3d}]  {col}")
-            idx += 1
-    print()
-
-
-def pick_column(dfs, labels, prompt):
-    """Let the user pick one column by global number or 'fi.colname'."""
-    choices = []
-    for fi, df in enumerate(dfs):
-        for col in df.columns:
-            choices.append((fi, col))
-
-    print(f"  {prompt}")
-    while True:
-        raw = input("  Enter number or fi.colname  (e.g. 0.RPM): ").strip()
-        # Numeric index
-        try:
-            n = int(raw)
-            if 0 <= n < len(choices):
-                return choices[n]
-        except ValueError:
-            pass
-        # fi.colname syntax
-        m = re.match(r"^(\d+)\.(.+)$", raw)
-        if m:
-            fi, col = int(m.group(1)), m.group(2)
-            if 0 <= fi < len(dfs) and col in dfs[fi].columns:
-                return fi, col
-        print(f"  Invalid — enter a number 0–{len(choices)-1} or 'fi.colname'.")
-
-
 def pick_column_from_file(df, label, prompt):
-    """Pick one column from a single DataFrame."""
     cols = list(df.columns)
     print(f"\n  {prompt}  (file: {label})")
     for i, c in enumerate(cols):
         print(f"    [{i:3d}]  {c}")
     while True:
-        raw = input("  Enter number or column name: ").strip()
+        raw = input("  Number or column name: ").strip()
         try:
             n = int(raw)
             if 0 <= n < len(cols):
@@ -159,105 +118,139 @@ def pick_column_from_file(df, label, prompt):
         print(f"  Invalid — enter 0–{len(cols)-1} or a column name.")
 
 
-# ── derived columns ───────────────────────────────────────────────────────────
+# ── per-file interactive setup ────────────────────────────────────────────────
 
-def add_derived_columns(dfs, labels):
-    """Prompt user to add computed columns to any loaded DataFrame.
-
-    Syntax:  fi.new_col = expression
-    In the expression, reference columns as  fi.col_name.
-    Standard shortcuts are pre-expanded before eval:
-        weight_g → N:   fi.T_N = fi.weight_g * 9.81 / 1000
-        electrical P:   fi.P_W = fi.voltage_v * fi.current_a
-    """
-    print("\nDerived columns  (press Enter to skip)")
-    print("  Syntax:  fi.new_col = expression  referencing fi.existing_col")
-    print("  Example: 1.T_N = 1.weight_g * 9.81 / 1000")
-    print("  Example: 1.P_W = 1.voltage_v * 1.current_a")
-
+def _filter_file(dfs, fi, labels):
+    """Optionally apply a row filter to dfs[fi] in-place."""
+    if _ask(f"  Row filter for '{labels[fi]}'?", ["y", "n"]) == "n":
+        return
+    print("  Pandas query expression for this file's columns.")
+    print("  Examples:  throttle > 200   /   time_s > 5 and time_s < 60")
+    print("  Press Enter to skip.")
     while True:
-        raw = input("  > ").strip()
+        raw = input("  filter> ").strip()
         if not raw:
-            break
+            return
+        fixed = re.sub(r"(?<![=!<>])=(?!=)", "==", raw)
+        if fixed != raw:
+            print(f"  (auto-fixed '=' → '=='  →  {fixed})")
+            raw = fixed
+        before = len(dfs[fi])
+        try:
+            dfs[fi] = dfs[fi].query(raw).reset_index(drop=True)
+            print(f"  ✓ {before} → {len(dfs[fi])} rows  (filter: {raw})")
+            return
+        except Exception as e:
+            print(f"  Error: {e}")
 
+
+def _derived_for_file(dfs, fi, labels):
+    """Optionally add derived columns to dfs[fi] in-place."""
+    if _ask(f"  Add derived column(s) to '{labels[fi]}'?", ["y", "n"]) == "n":
+        return
+    print("  Syntax:  fi.new_col = expression  referencing fi.existing_col")
+    print(f"  This file is [{fi}].  Example: {fi}.T_N = {fi}.weight_g * 9.81 / 1000")
+    print("  Press Enter to finish.")
+    df = dfs[fi]
+    while True:
+        raw = input("  derive> ").strip()
+        if not raw:
+            return
         m = re.match(r"^(\d+)\.(\w+)\s*=\s*(.+)$", raw)
         if not m:
-            print("  Bad syntax — use  fi.new_col = expression")
+            print(f"  Bad syntax — use  {fi}.new_col = expression")
+            continue
+        tgt_fi, new_col, expr = int(m.group(1)), m.group(2), m.group(3)
+        if tgt_fi != fi:
+            print(f"  Derived column target must be [{fi}] (the file just loaded).")
             continue
 
-        fi, new_col, expr = int(m.group(1)), m.group(2), m.group(3)
-        if fi >= len(dfs):
-            print(f"  File index {fi} out of range (have {len(dfs)} files).")
-            continue
-
-        df = dfs[fi]
-
-        # Replace every fi.colname token with a safe df["colname"] reference.
-        # Tokens from OTHER files are left untouched (will fail cleanly in eval).
         def _replace(match):
-            ref_fi = int(match.group(1))
-            ref_col = match.group(2)
+            ref_fi, ref_col = int(match.group(1)), match.group(2)
             if ref_fi == fi and ref_col in df.columns:
                 return f'_df["{ref_col}"]'
-            elif ref_fi != fi:
-                # cross-file references: substitute the other df's series
-                if ref_fi < len(dfs) and ref_col in dfs[ref_fi].columns:
-                    return f'_dfs[{ref_fi}]["{ref_col}"]'
+            if ref_fi < len(dfs) and ref_col in dfs[ref_fi].columns:
+                return f'_dfs[{ref_fi}]["{ref_col}"]'
             return match.group(0)
 
         safe_expr = re.sub(r"(\d+)\.(\w+)", _replace, expr)
-
         try:
             result = eval(safe_expr, {"_df": df, "_dfs": dfs, "np": np})
             df[new_col] = result
-            print(f"  ✓ Added  {fi}.{new_col}  to  '{labels[fi]}'")
+            sample = df[new_col].dropna().head(3).tolist()
+            print(f"  ✓ Added [{fi}].{new_col}  (sample: {sample})")
         except Exception as e:
             print(f"  Error: {e}")
 
 
-# ── row filters ───────────────────────────────────────────────────────────────
+def _load_and_setup(path_str, dfs, labels, paths):
+    """Load a CSV (or reuse if already loaded). Returns fi, or None on error."""
+    p = Path(path_str.strip())
+    resolved = str(p.resolve())
 
-def apply_row_filters(dfs, labels):
-    """Optionally filter rows of any file using pandas query syntax."""
-    print("\nRow filters  (press Enter to skip)")
-    print("  Syntax:  [fi:] query_expression  (fi defaults to 0)")
-    print("  Example: V_inf_ms == 0        ← applies to file 0")
-    print("  Example: 1: throttle > 200    ← applies to file 1")
+    if resolved in paths:
+        fi = paths.index(resolved)
+        print(f"  Reusing already-loaded [{fi}]: {labels[fi]}  ({len(dfs[fi])} rows)")
+        return fi
 
+    if not p.exists():
+        print(f"  File not found: {p}")
+        return None
+
+    df = pd.read_csv(p)
+    fi = len(dfs)
+    default_lbl = p.stem
+    raw_lbl = input(f"  Label [{default_lbl}]: ").strip()
+    lbl = raw_lbl if raw_lbl else default_lbl
+
+    dfs.append(df)
+    labels.append(lbl)
+    paths.append(resolved)
+    print(f"  Loaded [{fi}]: {lbl}  ({len(df)} rows × {len(df.columns)} cols)")
+
+    _filter_file(dfs, fi, labels)
+    _derived_for_file(dfs, fi, labels)
+    return fi
+
+
+# ── series collection ─────────────────────────────────────────────────────────
+
+def collect_series(dfs, labels, paths):
+    """Interactive loop: add series one by one until the user says n."""
+    series_list = []
     while True:
-        raw = input("  > ").strip()
-        if not raw:
+        if series_list:
+            print(f"\n  Series so far ({len(series_list)}):")
+            for i, s in enumerate(series_list):
+                print(f"    [{i}]  {labels[s['fi']]}: {s['x_col']}  →  {s['y_col']}  [{s['label']}]")
+
+        if _ask("\nAdd a series?", ["y", "n"]) == "n":
             break
-        m = re.match(r"^(\d+)\s*:\s*(.+)$", raw)
-        if m:
-            fi = int(m.group(1))
-            query = m.group(2).strip()
-        else:
-            fi = 0
-            query = raw
-        if fi >= len(dfs):
-            print(f"  File index {fi} out of range (have {len(dfs)} files).")
+
+        path_str = input("  File path: ").strip()
+        if not path_str:
             continue
-        # Fix single = → == (but leave ==, !=, <=, >= untouched)
-        fixed = re.sub(r"(?<![=!<>])=(?!=)", "==", query)
-        if fixed != query:
-            print(f"  (auto-fixed '=' → '=='  →  {fixed})")
-            query = fixed
-        before = len(dfs[fi])
-        try:
-            dfs[fi] = dfs[fi].query(query).reset_index(drop=True)
-            print(f"  ✓ File {fi} ({labels[fi]}): {before} → {len(dfs[fi])} rows  (filter: {query})")
-        except Exception as e:
-            print(f"  Error: {e}")
+
+        fi = _load_and_setup(path_str, dfs, labels, paths)
+        if fi is None:
+            continue
+
+        x_col = pick_column_from_file(dfs[fi], labels[fi], "X column:")
+        y_col = pick_column_from_file(dfs[fi], labels[fi], "Y column:")
+        default_lbl = f"{labels[fi]}: {y_col}"
+        raw_lbl = input(f"  Series label [{default_lbl}]: ").strip()
+        series_list.append({
+            "fi": fi, "x_col": x_col, "y_col": y_col,
+            "label": raw_lbl if raw_lbl else default_lbl,
+        })
+        print("  ✓ Series added.")
+
+    return series_list
 
 
-# ── plot session ──────────────────────────────────────────────────────────────
+# ── plot drawing helpers ──────────────────────────────────────────────────────
 
 def _draw_series_on_ax(ax, series_list, dfs, method, force_color=None):
-    """Plot all series onto ax. Returns (x_labels, y_labels) sets.
-
-    force_color: when set, overrides the color cycle for all series in this call.
-    """
     colors   = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     x_labels = set()
     y_labels = set()
@@ -289,8 +282,7 @@ def _draw_series_on_ax(ax, series_list, dfs, method, force_color=None):
 
 
 def _axis_limit_loop(fig, axes_flat):
-    """Interactive axis-limit adjustment shared between single and faceted plots."""
-    print("\nAdjust axis limits (applies to all subplots):")
+    print("\nAdjust axis limits:")
     print("  x 0 3000   — set X range")
     print("  y 0 5      — set Y range")
     print("  x auto / y auto  — reset")
@@ -328,51 +320,15 @@ def _axis_limit_loop(fig, axes_flat):
         print("  Usage:  x 0 3000  /  y 0 5  /  x auto  /  y auto  /  Enter to finish")
 
 
-def run_plot_session(dfs, labels, default_smooth):
-    """Collect series interactively and draw one comparison plot."""
+# ── plot session ──────────────────────────────────────────────────────────────
 
-    print_columns(dfs, labels)
-
-    # ── collect series ────────────────────────────────────────────────────────
-    series_list = []
-    print("Add series to plot. Each series picks its X and Y from one file.")
-    while True:
-        if series_list:
-            print(f"\n  Current series ({len(series_list)}):")
-            for i, s in enumerate(series_list):
-                print(f"    [{i}]  {labels[s['fi']]}.{s['x_col']}  →  {s['y_col']}  [{s['label']}]")
-
-        if _ask("\nAdd a series?", ["y", "n"]) == "n":
-            break
-
-        print("\n  Available files:")
-        for fi, lbl in enumerate(labels):
-            print(f"    [{fi}]  {lbl}  ({len(dfs[fi])} rows)")
-        while True:
-            try:
-                fi = int(input("  File index: ").strip())
-                if 0 <= fi < len(dfs):
-                    break
-            except ValueError:
-                pass
-            print(f"  Enter 0–{len(dfs)-1}.")
-
-        x_col = pick_column_from_file(dfs[fi], labels[fi], "X column:")
-        y_col = pick_column_from_file(dfs[fi], labels[fi], "Y column:")
-
-        default_label = f"{labels[fi]}: {y_col}"
-        raw_label = input(f"  Series label [{default_label}]: ").strip()
-        series_list.append({
-            "fi": fi, "x_col": x_col, "y_col": y_col,
-            "label": raw_label if raw_label else default_label,
-        })
-        print("  ✓ Series added.")
-
+def run_plot_session(series_list, dfs, labels, default_smooth):
+    """Draw one comparison plot from a pre-built series_list."""
     if not series_list:
-        print("  No series selected — skipping plot.")
+        print("  No series — nothing to plot.")
         return
 
-    # ── smoothing ─────────────────────────────────────────────────────────────
+    # ── smoothing ─────────────────────────────────────────────────────────
     if default_smooth is not None:
         method = default_smooth
         print(f"\nSmoothing: {method}  (set via --smooth)")
@@ -384,7 +340,7 @@ def run_plot_session(dfs, labels, default_smooth):
         print("  lowess  LOWESS smooth curve")
         method = _ask("Method", ["none", "bin", "sigma", "lowess"])
 
-    # ── grouping ──────────────────────────────────────────────────────────────
+    # ── grouping ──────────────────────────────────────────────────────────
     print("\nGroup series by a column value?")
     print("  colors    — one colored line per group on the same plot")
     print("  subplots  — one separate subplot per group")
@@ -405,129 +361,90 @@ def run_plot_session(dfs, labels, default_smooth):
             print(f"  Enter 0–{len(dfs)-1}.")
 
         facet_col = pick_column_from_file(dfs[facet_fi], labels[facet_fi],
-                                          "Column to group by (e.g. V_inf_ms or J):")
-
+                                          "Column to group by:")
         unique_vals = sorted(dfs[facet_fi][facet_col].dropna().unique())
         n = len(unique_vals)
 
         if group_mode == "colors":
-            # ── one colored line per group on the same plot ───────────────────
             fig, ax = plt.subplots(figsize=(11, 6))
             group_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-            x_labels = set()
-            y_labels = set()
-
+            x_labels, y_labels = set(), set()
             for vi, val in enumerate(unique_vals):
-                dfs_f = []
-                for fi, df in enumerate(dfs):
-                    if fi == facet_fi and facet_col in df.columns:
-                        dfs_f.append(df[df[facet_col] == val].reset_index(drop=True))
-                    else:
-                        dfs_f.append(df)
-
-                val_str = f"{val:.4g}" if isinstance(val, float) else str(val)
-                series_f = [
-                    {**s, "label": f"{s['label']}  {facet_col}={val_str}"}
-                    for s in series_list
+                dfs_f = [
+                    df[df[facet_col] == val].reset_index(drop=True)
+                    if fi == facet_fi and facet_col in df.columns else df
+                    for fi, df in enumerate(dfs)
                 ]
-                color = group_colors[vi % len(group_colors)]
+                val_str = f"{val:.4g}" if isinstance(val, float) else str(val)
+                series_f = [{**s, "label": f"{s['label']}  {facet_col}={val_str}"}
+                            for s in series_list]
                 xl, yl = _draw_series_on_ax(ax, series_f, dfs_f, method,
-                                            force_color=color)
-                x_labels |= xl
-                y_labels |= yl
+                                            force_color=group_colors[vi % len(group_colors)])
+                x_labels |= xl; y_labels |= yl
 
             ax.set_xlabel(" / ".join(sorted(x_labels)))
             ax.set_ylabel(" / ".join(sorted(y_labels)))
             title = f"{', '.join(s['y_col'] for s in series_list)}  vs  {' / '.join(sorted(x_labels))}"
             if method != "none":
                 title += f"  [{method}]"
-            ax.set_title(title)
-            ax.legend()
-            ax.grid(True, alpha=0.3)
+            ax.set_title(title); ax.legend(); ax.grid(True, alpha=0.3)
             fig.tight_layout()
-
-            plt.show(block=False)
-            plt.pause(0.1)
+            plt.show(block=False); plt.pause(0.1)
             _axis_limit_loop(fig, [ax])
 
-        else:
-            # ── one subplot per group ─────────────────────────────────────────
+        else:  # subplots
             ncols = min(n, 4)
             nrows = int(np.ceil(n / ncols))
-
-            fig, axes = plt.subplots(nrows, ncols,
-                                     figsize=(5 * ncols, 4 * nrows),
-                                     sharey=True, sharex=True,
-                                     squeeze=False)
+            fig, axes = plt.subplots(nrows, ncols, figsize=(5 * ncols, 4 * nrows),
+                                     sharey=True, sharex=True, squeeze=False)
             axes_flat = axes.flatten()
-            x_labels  = set()
-            y_labels  = set()
-
+            x_labels, y_labels = set(), set()
             for vi, val in enumerate(unique_vals):
                 ax = axes_flat[vi]
-
-                dfs_f = []
-                for fi, df in enumerate(dfs):
-                    if fi == facet_fi and facet_col in df.columns:
-                        dfs_f.append(df[df[facet_col] == val].reset_index(drop=True))
-                    else:
-                        dfs_f.append(df)
-
+                dfs_f = [
+                    df[df[facet_col] == val].reset_index(drop=True)
+                    if fi == facet_fi and facet_col in df.columns else df
+                    for fi, df in enumerate(dfs)
+                ]
                 xl, yl = _draw_series_on_ax(ax, series_list, dfs_f, method)
-                x_labels |= xl
-                y_labels |= yl
-
+                x_labels |= xl; y_labels |= yl
                 val_str = f"{val:.4g}" if isinstance(val, float) else str(val)
                 ax.set_title(f"{facet_col} = {val_str}", fontsize=9)
                 ax.grid(True, alpha=0.3)
-
             for vi in range(n, len(axes_flat)):
                 axes_flat[vi].set_visible(False)
-
             x_lbl = " / ".join(sorted(x_labels))
             y_lbl = " / ".join(sorted(y_labels))
             for ax in axes[:, 0]:
                 ax.set_ylabel(y_lbl)
             for ax in axes[-1, :]:
                 ax.set_xlabel(x_lbl)
-
             handles, leg_labels = axes_flat[0].get_legend_handles_labels()
             if handles:
                 fig.legend(handles, leg_labels, loc="upper right",
                            bbox_to_anchor=(1.0, 1.0), fontsize=8)
-
             suptitle = f"{', '.join(s['y_col'] for s in series_list)}  vs  {x_lbl}"
             if method != "none":
                 suptitle += f"  [{method}]"
-            fig.suptitle(suptitle, fontsize=10)
-            fig.tight_layout()
-
-            plt.show(block=False)
-            plt.pause(0.1)
+            fig.suptitle(suptitle, fontsize=10); fig.tight_layout()
+            plt.show(block=False); plt.pause(0.1)
             _axis_limit_loop(fig, [ax for ax in axes_flat if ax.get_visible()])
 
-    else:
-        # ── single overlay plot ───────────────────────────────────────────────
+    else:  # single overlay
         fig, ax = plt.subplots(figsize=(11, 6))
-
         x_labels, y_labels = _draw_series_on_ax(ax, series_list, dfs, method)
-
         ax.set_xlabel(" / ".join(sorted(x_labels)))
         ax.set_ylabel(" / ".join(sorted(y_labels)))
         title_y = ", ".join(s["y_col"] for s in series_list)
         title   = f"{title_y}  vs  {' / '.join(sorted(x_labels))}"
         if method != "none":
             title += f"  [{method}]"
-        ax.set_title(title)
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+        ax.set_title(title); ax.legend(); ax.grid(True, alpha=0.3)
         fig.tight_layout()
-
-        plt.show(block=False)
-        plt.pause(0.1)
+        plt.show(block=False); plt.pause(0.1)
         _axis_limit_loop(fig, [ax])
 
-    # ── save ──────────────────────────────────────────────────────────────────
+    # ── save ──────────────────────────────────────────────────────────────
     if _ask("\nSave plot?", ["y", "n"]) == "y":
         ts    = datetime.now().strftime("%Y%m%d_%H%M%S")
         y_str = "_".join(s["y_col"] for s in series_list)
@@ -550,42 +467,43 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--files", nargs="+", required=True,
-                        help="CSV files to load (theoretical and/or recordings)")
+    parser.add_argument("--files", nargs="*", default=[],
+                        help="CSV files to pre-load (optional; files can also be added interactively)")
     parser.add_argument("--labels", nargs="+", default=None,
-                        help="Display labels for each file (default: filename stem)")
+                        help="Display labels for pre-loaded files (default: filename stem)")
     parser.add_argument("--smooth", choices=["none", "bin", "sigma", "lowess"],
                         default=None,
                         help="Pre-select smoothing method (default: ask interactively)")
     args = parser.parse_args()
 
-    dfs = []
-    for f in args.files:
-        p = Path(f)
-        if not p.exists():
-            print(f"Error: file not found: {f}", file=sys.stderr)
-            sys.exit(1)
-        df = pd.read_csv(p)
-        dfs.append(df)
+    dfs:    list[pd.DataFrame] = []
+    labels: list[str]          = []
+    paths:  list[str]          = []   # resolved absolute paths, parallel to dfs
 
-    if args.labels:
-        labels = list(args.labels)
-        while len(labels) < len(dfs):
-            labels.append(Path(args.files[len(labels)]).stem)
-    else:
-        labels = [Path(f).stem for f in args.files]
+    # Pre-load --files if supplied
+    if args.files:
+        for i, f in enumerate(args.files):
+            p = Path(f)
+            if not p.exists():
+                print(f"Error: file not found: {f}", file=sys.stderr)
+                sys.exit(1)
+            df  = pd.read_csv(p)
+            lbl = (args.labels[i]
+                   if args.labels and i < len(args.labels)
+                   else p.stem)
+            dfs.append(df)
+            labels.append(lbl)
+            paths.append(str(p.resolve()))
 
-    print("\nLoaded files:")
-    for fi, (df, lbl) in enumerate(zip(dfs, labels)):
-        print(f"  [{fi}]  {lbl}  —  {len(df)} rows × {len(df.columns)} cols")
+        print("\nPre-loaded files:")
+        for fi, (df, lbl) in enumerate(zip(dfs, labels)):
+            print(f"  [{fi}]  {lbl}  —  {len(df)} rows × {len(df.columns)} cols")
 
-    # Optional: add derived columns and row filters
-    add_derived_columns(dfs, labels)
-    apply_row_filters(dfs, labels)
-
-    # Plot loop
+    # Main plot loop
     while True:
-        run_plot_session(dfs, labels, args.smooth)
+        series_list = collect_series(dfs, labels, paths)
+        if series_list:
+            run_plot_session(series_list, dfs, labels, args.smooth)
         if _ask("\nMake another plot?", ["y", "n"]) == "n":
             break
 

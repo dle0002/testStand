@@ -591,10 +591,11 @@ def recording_stop():
         try:
             _generate_plot(data, png_path)
             _sse_push({
-                'type':   'plot_ready',
-                'plot':   f'/static/{png_name}',
-                'csv':    f'/recordings/{csv_name}',
-                'points': len(data),
+                'type':     'plot_ready',
+                'plot':     f'/static/{png_name}',
+                'csv':      f'/recordings/{csv_name}',
+                'stem':     ts,
+                'points':   len(data),
                 'duration': round(data[-1]['time_s'], 1) if data else 0,
             })
         except Exception as e:
@@ -609,6 +610,41 @@ def recording_stop():
 @app.route('/recordings/<filename>')
 def serve_recording(filename: str):
     return send_from_directory(RECORDINGS_DIR, filename)
+
+
+@app.route('/api/recording/rename', methods=['POST'])
+def recording_rename():
+    data     = request.get_json(force=True)
+    old_stem = data.get('old_stem', '').strip()
+    new_name = data.get('new_name', '').strip()
+    if not old_stem or not new_name:
+        return jsonify({'ok': False, 'error': 'missing parameters'}), 400
+    new_name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in new_name).strip('_')
+    if not new_name:
+        return jsonify({'ok': False, 'error': 'invalid name'}), 400
+
+    old_csv = os.path.join(RECORDINGS_DIR, f'recording_{old_stem}.csv')
+    old_png = os.path.join(os.path.dirname(__file__), 'static', f'plot_{old_stem}.png')
+    new_csv = os.path.join(RECORDINGS_DIR, f'{new_name}.csv')
+    new_png = os.path.join(os.path.dirname(__file__), 'static', f'{new_name}.png')
+
+    if old_csv == new_csv:
+        return jsonify({'ok': True, 'csv': f'/recordings/{new_name}.csv',
+                        'plot': f'/static/{new_name}.png'})
+
+    errors = []
+    if os.path.exists(old_csv):
+        os.rename(old_csv, new_csv)
+    else:
+        errors.append('csv not found')
+    if os.path.exists(old_png):
+        os.rename(old_png, new_png)
+    else:
+        errors.append('plot not found')
+
+    return jsonify({'ok': not errors, 'errors': errors,
+                    'csv':  f'/recordings/{new_name}.csv',
+                    'plot': f'/static/{new_name}.png'})
 
 
 # -----------------------------------------------------------------------

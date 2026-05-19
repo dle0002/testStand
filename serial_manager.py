@@ -208,7 +208,7 @@ def _read_loop_hall_binary(ser: serial.Serial):
                 fv  = sorted(win[-n_w:])[n_w // 2]
                 if prev_pos_abs is not None:
                     interval_s = (abs_idx - prev_pos_abs) / _HALL_FS
-                    if 0 < interval_s < 2.0:
+                    if 0.002 < interval_s < 0.6:   # 100–30000 RPM
                         with _lock:
                             _state['hall']['rpm'] = _rpm_median(
                                 int(round(60.0 / interval_s)))

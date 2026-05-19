@@ -661,29 +661,8 @@ def add_cal_point():
     data  = request.get_json(force=True)
     pitch = float(data.get('pitch_deg', 0))
 
-    THR_LOW       = 150    # DShot throttle at sweep start/end
-    THR_HIGH      = 250    # DShot throttle at sweep peak
-    RAMP_DURATION = 10.0   # seconds per ramp leg
-    STEP_INTERVAL = 0.2    # seconds between throttle steps
-    steps = int(RAMP_DURATION / STEP_INTERVAL)
-
     serial_manager.start_cal_collection()
-
-    # Ramp up: THR_LOW → THR_HIGH over RAMP_DURATION seconds
-    for i in range(steps + 1):
-        thr = round(THR_LOW + (THR_HIGH - THR_LOW) * i / steps)
-        serial_manager.set_motor_speed(thr)
-        time.sleep(STEP_INTERVAL)
-
-    # Ramp down: THR_HIGH → THR_LOW over RAMP_DURATION seconds
-    for i in range(steps + 1):
-        thr = round(THR_HIGH - (THR_HIGH - THR_LOW) * i / steps)
-        serial_manager.set_motor_speed(thr)
-        time.sleep(STEP_INTERVAL)
-
-    # Stop motor
-    serial_manager.set_motor_speed(0)
-
+    time.sleep(10.0)   # collect 10 s of peaks at steady-state, same as scope.py
     pos_samples, neg_samples = serial_manager.stop_cal_collection()
 
     missing = []

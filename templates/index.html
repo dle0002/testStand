@@ -164,7 +164,7 @@
   }
 
   .logs-grid {
-    flex: 1; display: grid; grid-template-rows: repeat(3, 1fr); overflow: hidden;
+    flex: 1; display: grid; grid-template-rows: repeat(4, 1fr); overflow: hidden;
   }
   .log-panel {
     display: flex; flex-direction: column; border-bottom: 1px solid var(--border); overflow: hidden;
@@ -179,6 +179,7 @@
   .log-title.hall     { color: var(--purple); }
   .log-title.loadcell { color: var(--green);  }
   .log-title.esc      { color: var(--orange); }
+  .log-title.encoder  { color: var(--cyan);   }
   .log-clear { font-size: 11px; color: var(--muted); background: none; border: none; cursor: pointer; padding: 2px 6px; }
   .log-clear:hover { color: var(--text); }
   .log-body {
@@ -189,6 +190,7 @@
   .log-line.hall     { color: #c9b4ff; }
   .log-line.loadcell { color: #7ee787; }
   .log-line.esc      { color: #ffa657; }
+  .log-line.encoder  { color: #56d364; }
   .log-line.system   { color: var(--muted); font-style: italic; }
 
   ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -289,6 +291,7 @@
       <div class="badge"><div class="dot" id="dot-hall"></div><span>Hall</span></div>
       <div class="badge"><div class="dot" id="dot-loadcell"></div><span>Load Cell</span></div>
       <div class="badge"><div class="dot" id="dot-esc"></div><span>ESC</span></div>
+      <div class="badge"><div class="dot" id="dot-encoder"></div><span>Encoder</span></div>
       <button class="btn-rescan" id="btn-rescan" onclick="rescanPorts()">⟳ Rescan</button>
       <button class="btn-rescan" onclick="syncDevices()">⏱ Sync</button>
     </div>
@@ -417,6 +420,8 @@
           <tr><td class="lbl">Hall V (−)</td>   <td class="val" id="m-hall-neg-v" style="color:var(--purple)">—</td></tr>
           <tr id="row-pitch-pos" style="display:none"><td class="lbl">Pitch (+)</td><td class="val" id="m-pitch-pos" style="color:var(--cyan)">—°</td></tr>
           <tr id="row-pitch-neg" style="display:none"><td class="lbl">Pitch (−)</td><td class="val" id="m-pitch-neg" style="color:var(--cyan)">—°</td></tr>
+          <tr><td class="lbl">Enc Angle</td><td class="val" id="m-enc-deg"   style="color:var(--blue)">—</td></tr>
+          <tr><td class="lbl">Pitch (enc)</td><td class="val" id="m-enc-pitch" style="color:var(--green)">—</td></tr>
         </table>
       </div>
 
@@ -428,6 +433,7 @@
             <option value="esc">ESC</option>
             <option value="hall">Hall</option>
             <option value="loadcell">Load Cell</option>
+            <option value="encoder">Encoder</option>
           </select>
           <input type="text" id="cmd-input" placeholder="ARM / TARE / d …">
           <button class="btn btn-set" onclick="sendCmd()" style="flex:0;padding:6px 10px">Send</button>
@@ -435,7 +441,8 @@
         <div style="margin-top:6px;font-size:10px;color:var(--muted);line-height:1.6">
           ESC: ARM · DISARM · T:&lt;48-2047&gt; · LOG:&lt;hz&gt;<br>
           Hall: d · SYNC:&lt;ms&gt;<br>
-          Load: TARE · CAL:&lt;g&gt; · LOG:&lt;hz&gt;
+          Load: TARE · CAL:&lt;g&gt; · LOG:&lt;hz&gt;<br>
+          Encoder: e (enc zero) · t (pitch zero)
         </div>
       </div>
 
@@ -528,6 +535,25 @@
                 onclick="clearCalibration()">Clear All</button>
       </div>
 
+      <!-- Encoder calibration -->
+      <div class="card">
+        <div class="card-title">AS5600 Encoder Calibration</div>
+        <button class="btn btn-set" style="width:100%;margin-bottom:6px" onclick="encSetZero()">
+          Set Encoder Zero &nbsp;<span style="color:var(--muted);font-size:11px">(e)</span>
+        </button>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Place arm parallel to shaft, then set zero.
+        </div>
+        <button class="btn btn-set" style="width:100%;margin-bottom:6px" onclick="encSetPitchZero()">
+          Set Pitch Zero &nbsp;<span style="color:var(--muted);font-size:11px">(t)</span>
+        </button>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Set current position as 0° pitch reference.
+        </div>
+        <div id="enc-cal-status"
+             style="font-size:11px;color:var(--muted);text-align:center;min-height:16px"></div>
+      </div>
+
     </div><!-- /left-panel -->
 
     <!-- ===== RIGHT PANEL ============================================== -->
@@ -597,6 +623,13 @@
           </div>
           <div class="log-body" id="log-esc"></div>
         </div>
+        <div class="log-panel">
+          <div class="log-header">
+            <span class="log-title encoder">AS5600 Encoder</span>
+            <button class="log-clear" onclick="clearLog('encoder')">clear</button>
+          </div>
+          <div class="log-body" id="log-encoder"></div>
+        </div>
       </div>
 
     </div><!-- /right-panel -->
@@ -633,7 +666,7 @@
 // State
 // -----------------------------------------------------------------------
 const MAX_LINES = 300;
-const autoScroll = { hall: true, loadcell: true, esc: true };
+const autoScroll = { hall: true, loadcell: true, esc: true, encoder: true };
 
 // UI refresh throttle — latestVals stores the most recent parsed value per
 // element id; the uiTicker flushes them to the DOM at uiRateMs intervals.
@@ -1019,7 +1052,7 @@ function clearLog(source) {
   document.getElementById('log-' + source).innerHTML = '';
 }
 
-['hall','loadcell','esc'].forEach(src => {
+['hall','loadcell','esc','encoder'].forEach(src => {
   const body = document.getElementById('log-' + src);
   body.addEventListener('scroll', () => {
     autoScroll[src] = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
@@ -1035,14 +1068,15 @@ function setEl(id, text) {
 }
 
 function applyStatus(data) {
-  ['hall','loadcell','esc'].forEach(src => {
+  ['hall','loadcell','esc','encoder'].forEach(src => {
     const connected = data[src]?.connected;
     document.getElementById('dot-' + src)?.classList.toggle('on', !!connected);
   });
 
-  const h = data.hall      || {};
-  const l = data.loadcell  || {};
-  const e = data.esc       || {};
+  const h   = data.hall      || {};
+  const l   = data.loadcell  || {};
+  const e   = data.esc       || {};
+  const enc = data.encoder   || {};
 
   const rpm      = h.rpm      != null ? h.rpm.toLocaleString()       : '—';
   const escRpm   = e.rpm      != null ? e.rpm.toLocaleString()       : '—';
@@ -1086,6 +1120,16 @@ function applyStatus(data) {
       }
     }
   }
+  if (enc.enc_deg != null) {
+    setEl('m-enc-deg', enc.enc_deg.toFixed(1) + '°');
+  }
+  if (enc.pitch_deg != null) {
+    setEl('m-enc-pitch', enc.pitch_deg.toFixed(1) + '°');
+    if (_pitchChart) _pitchChart.push(2, enc.pitch_deg);
+  } else if (enc.connected) {
+    setEl('m-enc-pitch', 'INVALID');
+  }
+
   setEl('bar-rpm',      rpm);
   setEl('bar-esc-rpm',  escRpm);
   setEl('bar-thrust',   l.weight != null ? l.weight.toFixed(1) : '—');
@@ -1139,6 +1183,7 @@ const _HALL_RE     = /POL:([+-]) V:(-?[\d.]+) RPM:(\d+)/;
 const _RPM_ZERO_RE = /RPM:0/;
 const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
 const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;
+const _ENCODER_RE  = /raw:\s*(\d+)\s*\|\s*enc:\s*([\d.]+)\s*deg\s*\|\s*pitch:\s*(INVALID|-?[\d.]+)/;
 
 function parseLiveLine(source, line) {
   if (source === 'hall') {
@@ -1197,7 +1242,47 @@ function parseLiveLine(source, line) {
       _lv('m-temp',      m[6] + ' °C');
       _lv('m-mah',       m[7] + ' mAh');
     }
+  } else if (source === 'encoder') {
+    const m = _ENCODER_RE.exec(line);
+    if (m) {
+      const encDeg = parseFloat(m[2]);
+      _lv('m-enc-deg', encDeg.toFixed(1) + '°');
+      if (m[3] === 'INVALID') {
+        _lv('m-enc-pitch', 'INVALID');
+      } else {
+        const pitchDeg = parseFloat(m[3]);
+        _lv('m-enc-pitch', pitchDeg.toFixed(1) + '°');
+        if (_pitchChart) _pitchChart.push(2, pitchDeg);
+      }
+    }
   }
+}
+
+// -----------------------------------------------------------------------
+// Encoder calibration
+// -----------------------------------------------------------------------
+function encSetZero() {
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source: 'encoder', command: 'e'})
+  }).then(() => {
+    appendLog('encoder', '> e (encoder zeroed)', 'system');
+    const st = document.getElementById('enc-cal-status');
+    if (st) { st.textContent = 'Encoder zero set ✓'; setTimeout(() => { st.textContent = ''; }, 3000); }
+  }).catch(console.error);
+}
+
+function encSetPitchZero() {
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({source: 'encoder', command: 't'})
+  }).then(() => {
+    appendLog('encoder', '> t (pitch zeroed)', 'system');
+    const st = document.getElementById('enc-cal-status');
+    if (st) { st.textContent = 'Pitch zero set ✓'; setTimeout(() => { st.textContent = ''; }, 3000); }
+  }).catch(console.error);
 }
 
 // -----------------------------------------------------------------------
@@ -1686,7 +1771,7 @@ function trajUpload(input) {
 // -----------------------------------------------------------------------
 // Init
 // -----------------------------------------------------------------------
-['hall','loadcell','esc'].forEach(src => {
+['hall','loadcell','esc','encoder'].forEach(src => {
   fetch('/api/logs/' + src)
     .then(r => r.json())
     .then(d => (d.lines || []).forEach(l => appendLog(src, l)))
@@ -1716,6 +1801,7 @@ _pitchChart = new RollingChart(document.getElementById('chart-pitch'), {
   series: [
     {label: 'Pitch (+)', color: '#bc8cff'},
     {label: 'Pitch (−)', color: '#39d4cc'},
+    {label: 'Pitch (enc)', color: '#56d364'},
   ],
   windowS: _plotWindowS,
 });

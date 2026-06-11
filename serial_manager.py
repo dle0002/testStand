@@ -26,6 +26,7 @@ import serial.tools.list_ports
 HALL_PORT     = None   # e.g. '/dev/ttyACM0'
 LOADCELL_PORT = None   # e.g. '/dev/ttyACM1'
 ESC_PORT      = None   # e.g. '/dev/ttyACM2'
+ENCODER_PORT  = None   # e.g. '/dev/ttyACM3'  AS5600 magnetic encoder
 BAUD          = 115200
 
 # ESC DShot throttle range
@@ -57,6 +58,9 @@ _LOADCELL_RE  = re.compile(r'\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)')
 _ESC_RE       = re.compile(
     r'\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh'
 )
+_ENCODER_RE   = re.compile(
+    r'raw:\s*(\d+)\s*\|\s*enc:\s*([\d.]+)\s*deg\s*\|\s*pitch:\s*(INVALID|-?[\d.]+)'
+)
 
 _cal_active      = False
 _cal_samples_pos: list = []
@@ -78,6 +82,10 @@ _state: dict = {
         'temp': 0, 'mah': 0,
         'connected': False, 'port': None,
     },
+    'encoder': {
+        'raw': 0, 'enc_deg': 0.0, 'pitch_deg': None,
+        'connected': False, 'port': None,
+    },
 }
 _serials: dict[str, serial.Serial] = {}
 _log_queue: queue.Queue = queue.Queue(maxsize=2000)
@@ -85,6 +93,7 @@ _log_buffer: dict[str, deque] = {
     'hall':     deque(maxlen=300),
     'loadcell': deque(maxlen=300),
     'esc':      deque(maxlen=300),
+    'encoder':  deque(maxlen=300),
 }
 _lock = threading.Lock()
 
@@ -298,6 +307,17 @@ def _read_loop(source: str, ser: serial.Serial):
                         _state['esc']['temp']         = int(m.group(6))
                         _state['esc']['mah']          = int(m.group(7))
 
+            elif source == 'encoder':
+                m = _ENCODER_RE.search(line)
+                if m:
+                    pitch_str = m.group(3)
+                    with _lock:
+                        _state['encoder']['raw']      = int(m.group(1))
+                        _state['encoder']['enc_deg']  = float(m.group(2))
+                        _state['encoder']['pitch_deg'] = (
+                            None if pitch_str == 'INVALID' else float(pitch_str)
+                        )
+
         except serial.SerialException:
             with _lock:
                 _state[source]['connected'] = False
@@ -388,6 +408,8 @@ def _sniff_port(port: str) -> str | None:
                 or 'POL:' in text or 'ISR:' in text
                 or 'raw stream ON' in text or 'raw stream OFF' in text):
             return 'hall'
+        if 'AS5600' in text or '| enc:' in text or 'Angle + Pitch' in text:
+            return 'encoder'
         if 'raw:' in text or 'CAL' in text or 'TARE' in text or 'not calibrated' in text:
             return 'loadcell'
         if 'THR:' in text or 'ARMED' in text or 'DShot' in text or 'DISARM' in text:
@@ -422,6 +444,7 @@ def start():
         'hall':     HALL_PORT,
         'loadcell': LOADCELL_PORT,
         'esc':      ESC_PORT,
+        'encoder':  ENCODER_PORT,
     }
     needed  = [s for s, p in explicit.items() if p is None]
     port_map = {s: p for s, p in explicit.items() if p is not None}
@@ -433,7 +456,7 @@ def start():
     for source, port in port_map.items():
         _connect(source, port)
 
-    unconnected = [s for s in ('hall', 'loadcell', 'esc') if s not in port_map]
+    unconnected = [s for s in ('hall', 'loadcell', 'esc', 'encoder') if s not in port_map]
     if unconnected:
         print(f"[serial] WARNING: no port found for {unconnected}. "
               "Set HALL_PORT / LOADCELL_PORT / ESC_PORT explicitly if needed.")
@@ -444,7 +467,7 @@ def reconnect() -> dict[str, bool]:
     """Re-scan for any devices that are not currently connected.
     Returns a dict of source → True if newly connected."""
     with _lock:
-        missing = [s for s in ('hall', 'loadcell', 'esc') if not _state[s]['connected']]
+        missing = [s for s in ('hall', 'loadcell', 'esc', 'encoder') if not _state[s]['connected']]
 
     if not missing:
         print("[serial] reconnect: all devices already connected")
@@ -514,7 +537,7 @@ def sync_all():
     cmd = f"SYNC:{epoch_ms}"
     with _lock:
         serials = {s: ser for s, ser in _serials.items()
-                   if s != 'hall'}          # hall excluded — binary mode
+                   if s not in ('hall', 'encoder')}   # hall: binary mode; encoder: no SYNC support
     synced = []
     for source, ser in serials.items():
         try:

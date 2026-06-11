@@ -200,7 +200,9 @@ def _generate_plot(data: list[dict], path: str):
 
     pitch_pos_raw = [_to_float(d.get('pitch_pos')) for d in data]
     pitch_neg_raw = [_to_float(d.get('pitch_neg')) for d in data]
-    has_pitch = any(v is not None for v in pitch_pos_raw + pitch_neg_raw)
+    pitch_enc_raw = [_to_float(d.get('pitch_enc')) for d in data]
+    enc_deg_raw   = [_to_float(d.get('enc_deg'))   for d in data]
+    has_pitch = any(v is not None for v in pitch_pos_raw + pitch_neg_raw + pitch_enc_raw)
 
     BG    = '#0d1117'
     SURF  = '#161b22'
@@ -280,10 +282,14 @@ def _generate_plot(data: list[dict], path: str):
         v_pp = [v for v in pitch_pos_raw if v is not None]
         t_pn = [t for t, v in zip(times, pitch_neg_raw) if v is not None]
         v_pn = [v for v in pitch_neg_raw if v is not None]
+        t_pe = [t for t, v in zip(times, pitch_enc_raw) if v is not None]
+        v_pe = [v for v in pitch_enc_raw if v is not None]
         if t_pp:
             ax.plot(t_pp, v_pp, color='#79c0ff', linewidth=1.2, label='Pitch (+)')
         if t_pn:
             ax.plot(t_pn, v_pn, color='#ff7b72', linewidth=1.2, label='Pitch (−)')
+        if t_pe:
+            ax.plot(t_pe, v_pe, color='#56d364', linewidth=1.5, label='Pitch (enc)')
         ax.axhline(0, color=MUTED, linewidth=0.5, linestyle='--')
         ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
                   edgecolor=BORDER, framealpha=0.8)
@@ -500,7 +506,7 @@ def status():
 
 @app.route('/api/logs/<source>')
 def logs(source: str):
-    if source not in ('hall', 'loadcell', 'esc'):
+    if source not in ('hall', 'loadcell', 'esc', 'encoder'):
         return jsonify({'error': 'unknown source'}), 400
     return jsonify({'lines': serial_manager.get_log_history(source)})
 
@@ -510,7 +516,7 @@ def send_command():
     data   = request.get_json(force=True)
     source = data.get('source', '')
     cmd    = data.get('command', '').strip()
-    if source not in ('hall', 'loadcell', 'esc'):
+    if source not in ('hall', 'loadcell', 'esc', 'encoder'):
         return jsonify({'error': 'unknown source'}), 400
     ok = serial_manager.send_command(source, cmd)
     return jsonify({'ok': ok})
@@ -814,6 +820,7 @@ def _recorder():
         st    = serial_manager.get_status()
         pos_v = st['hall'].get('pos_voltage', 0.0)
         neg_v = st['hall'].get('neg_voltage', 0.0)
+        enc   = st.get('encoder', {})
         with _cal_srv_lock:
             cal = dict(_calibration)
 
@@ -845,6 +852,8 @@ def _recorder():
                 'neg_voltage': round(neg_v, 4),
                 'pitch_pos':   round(pitch_pos_f, 2) if pitch_pos_f is not None else '',
                 'pitch_neg':   round(pitch_neg_f, 2) if pitch_neg_f is not None else '',
+                'enc_deg':     round(enc.get('enc_deg', 0.0), 3),
+                'pitch_enc':   round(enc['pitch_deg'], 3) if enc.get('pitch_deg') is not None else '',
             })
 
         time.sleep(1.0 / rate if active else 0.1)

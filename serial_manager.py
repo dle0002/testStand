@@ -61,6 +61,9 @@ _ESC_RE       = re.compile(
 _ENCODER_RE   = re.compile(
     r'raw:\s*(\d+)\s*\|\s*enc:\s*([\d.]+)\s*deg\s*\|\s*pitch:\s*(INVALID|-?[\d.]+)'
 )
+_HALL_PITCH_RE = re.compile(
+    r'\[\s*\d+ms\]\s+pitch:\s*(-?[\d.]+)\s+raw:\s*(\d+)\s+V:\s*([\d.]+)'
+)
 
 _cal_active      = False
 _cal_samples_pos: list = []
@@ -69,6 +72,7 @@ _cal_samples_neg: list = []
 _state: dict = {
     'hall': {
         'rpm': 0, 'voltage': 0.0, 'pos_voltage': 0.0, 'neg_voltage': 0.0, 'polarity': '+',
+        'pitch_deg': None, 'raw': 0,
         'connected': False, 'port': None,
     },
     'loadcell': {
@@ -318,6 +322,21 @@ def _read_loop(source: str, ser: serial.Serial):
                             None if pitch_str == 'INVALID' else float(pitch_str)
                         )
 
+            elif source == 'hall':
+                m = _HALL_PITCH_RE.match(line)
+                if m:
+                    with _lock:
+                        _state['hall']['pitch_deg'] = float(m.group(1))
+                        _state['hall']['raw']       = int(m.group(2))
+                        _state['hall']['voltage']   = float(m.group(3))
+                elif 'not calibrated' in line:
+                    m2 = re.search(r'raw:\s*(\d+)\s+V:\s*([\d.]+)', line)
+                    if m2:
+                        with _lock:
+                            _state['hall']['pitch_deg'] = None
+                            _state['hall']['raw']       = int(m2.group(1))
+                            _state['hall']['voltage']   = float(m2.group(2))
+
         except serial.SerialException:
             with _lock:
                 _state[source]['connected'] = False
@@ -344,33 +363,10 @@ def _connect(source: str, port: str) -> bool:
             time.sleep(0.1)
             _write(ser, "LOG:1")
         elif source == 'hall':
+            # Pitch-mode firmware: text output, no binary stream
             time.sleep(0.1)
-            # Identical handshake to scope.py — keep toggling until "raw stream ON"
-            # is confirmed.  Handles a Pico left in binary mode by a previous
-            # scope.py session (first toggle → OFF, second → ON).
-            for _attempt in range(3):
-                ser.reset_input_buffer()
-                ser.write(b'r\n')
-                ser.flush()
-                resp, deadline = b'', time.time() + 3.0
-                while time.time() < deadline:
-                    resp += ser.read(256)
-                    if b'raw stream ON' in resp:
-                        break
-                    if b'raw stream OFF' in resp:
-                        break   # need another toggle
-                    time.sleep(0.05)
-                if b'raw stream ON' in resp:
-                    print('[serial] hall binary streaming ON')
-                    break
-                print(f'[serial] hall toggle attempt {_attempt + 1}: '
-                      + resp.decode('utf-8', errors='replace').strip())
-            else:
-                print('[serial] hall WARNING: could not confirm binary mode')
-            ser.reset_input_buffer()
-            threading.Thread(target=_read_loop_hall_binary, args=(ser,), daemon=True).start()
-        if source != 'hall':
-            threading.Thread(target=_read_loop, args=(source, ser), daemon=True).start()
+            _write(ser, "LOG:5")
+        threading.Thread(target=_read_loop, args=(source, ser), daemon=True).start()
         print(f"[serial] {source} connected on {port}")
         return True
     except Exception as e:
@@ -529,15 +525,14 @@ def set_motor_speed(speed: int):
 
 
 def sync_all():
-    """Send the same SYNC epoch to ESC and loadcell.
-    Hall is excluded: it runs in binary streaming mode and the firmware would
-    inject the text response into the ADC sample stream, corrupting it.
+    """Send the same SYNC epoch to all text-mode devices (esc, loadcell, hall).
+    Encoder excluded: its firmware has no SYNC command.
     """
     epoch_ms = int(time.time() * 1000)
     cmd = f"SYNC:{epoch_ms}"
     with _lock:
         serials = {s: ser for s, ser in _serials.items()
-                   if s not in ('hall', 'encoder')}   # hall: binary mode; encoder: no SYNC support
+                   if s != 'encoder'}   # encoder: no SYNC support
     synced = []
     for source, ser in serials.items():
         try:
@@ -550,12 +545,10 @@ def sync_all():
 
 
 def set_log_rate(hz: float):
-    """Set telemetry logging rate on ESC and load cell.
-    Hall sensor has no rate control (only a debug toggle).
-    """
+    """Set telemetry logging rate on ESC, load cell, and hall sensor."""
     hz = max(0.1, min(100.0, hz))
     cmd = f"LOG:{hz:.1f}"
-    for source in ('esc', 'loadcell'):
+    for source in ('esc', 'loadcell', 'hall'):
         with _lock:
             ser = _serials.get(source)
         if ser:
@@ -610,6 +603,36 @@ def stop_cal_collection() -> tuple:
     with _lock:
         _cal_active = False
         return list(_cal_samples_pos), list(_cal_samples_neg)
+
+
+def calibrate_hall(pitch_deg: float) -> bool:
+    """Send CAL:<deg> to hall sensor — Pico records current ADC as that pitch."""
+    with _lock:
+        ser = _serials.get('hall')
+    if not ser:
+        return False
+    _write(ser, f"CAL:{pitch_deg:.2f}")
+    return True
+
+
+def del_hall_cal_point(pitch_deg: float) -> bool:
+    """Send DEL:<deg> to hall sensor — Pico deletes the nearest calibration point."""
+    with _lock:
+        ser = _serials.get('hall')
+    if not ser:
+        return False
+    _write(ser, f"DEL:{pitch_deg:.2f}")
+    return True
+
+
+def clear_hall_cal() -> bool:
+    """Send CLEAR to hall sensor — wipes all on-device calibration points."""
+    with _lock:
+        ser = _serials.get('hall')
+    if not ser:
+        return False
+    _write(ser, "CLEAR")
+    return True
 
 
 def get_log_history(source: str, n: int = 200) -> list[str]:

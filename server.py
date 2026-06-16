@@ -67,11 +67,12 @@ def _load_calibration() -> dict:
     try:
         with open(CALIBRATION_PATH) as f:
             data = json.load(f)
-        if 'positive' in data and 'negative' in data:
+        # Accept both old voltage-based format and new hall_pts format
+        if 'hall_pts' in data or 'positive' in data:
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         pass
-    return {'positive': {}, 'negative': {}}
+    return {'hall_pts': []}
 
 
 def _save_calibration(cal: dict):
@@ -80,7 +81,7 @@ def _save_calibration(cal: dict):
 
 
 _cal_srv_lock = threading.Lock()
-_calibration: dict = _load_calibration()   # {"positive": {pitch_str: V}, "negative": {pitch_str: V}}
+_calibration: dict = _load_calibration()   # {"hall_pts": [pitch_deg, ...]}
 
 # -----------------------------------------------------------------------
 # SSE
@@ -184,25 +185,21 @@ _traj_data: list[dict] = []   # [{'rpm': int, 'duration_s': float}, ...]
 
 def _generate_plot(data: list[dict], path: str):
     times    = [d['time_s']       for d in data]
-    rpm_hall = [d['rpm_hall']     for d in data]
     rpm_esc  = [d['esc_rpm']      for d in data]
     thrust   = [d['weight_g']     for d in data]
     voltage  = [d['voltage_v']    for d in data]
     current  = [d['current_a']    for d in data]
     temp     = [d['temp_c']       for d in data]
-    throttle = [d['throttle'] for d in data]
-    pos_v    = [d.get('pos_voltage', 0.0) for d in data]
-    neg_v    = [d.get('neg_voltage', 0.0) for d in data]
+    throttle = [d['throttle']     for d in data]
 
     def _to_float(v):
         try:    return float(v)
         except: return None
 
-    pitch_pos_raw = [_to_float(d.get('pitch_pos')) for d in data]
-    pitch_neg_raw = [_to_float(d.get('pitch_neg')) for d in data]
-    pitch_enc_raw = [_to_float(d.get('pitch_enc')) for d in data]
-    enc_deg_raw   = [_to_float(d.get('enc_deg'))   for d in data]
-    has_pitch = any(v is not None for v in pitch_pos_raw + pitch_neg_raw + pitch_enc_raw)
+    pitch_hall_raw = [_to_float(d.get('pitch_hall')) for d in data]
+    pitch_enc_raw  = [_to_float(d.get('pitch_enc'))  for d in data]
+    enc_deg_raw    = [_to_float(d.get('enc_deg'))     for d in data]
+    has_pitch = any(v is not None for v in pitch_hall_raw + pitch_enc_raw)
 
     BG    = '#0d1117'
     SURF  = '#161b22'
@@ -226,9 +223,8 @@ def _generate_plot(data: list[dict], path: str):
     # ── RPM ──
     ax = axes[0]
     _style(ax)
-    ax.plot(times, rpm_hall, color='#bc8cff', linewidth=1.5, label='Hall RPM')
     ax.plot(times, rpm_esc,  color='#f0883e', linewidth=1.5, label='ESC RPM')
-    ax.plot(times, [t * (max(rpm_hall + rpm_esc) or 1) / 1047 for t in throttle],
+    ax.plot(times, [t * (max(rpm_esc) or 1) / 1047 for t in throttle],
             color='#58a6ff', linewidth=1, linestyle=':', alpha=0.6, label='Throttle (scaled)')
     ax.set_ylabel('RPM')
     ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
@@ -265,29 +261,28 @@ def _generate_plot(data: list[dict], path: str):
     ax.plot(times, temp, color='#f85149', linewidth=1.5)
     ax.set_ylabel('Temp (°C)')
 
-    # ── Hall raw voltage (pos + neg peaks) ──
+    # ── Hall ADC voltage (raw sensor output) ──
     ax = axes[4]
     _style(ax)
-    ax.plot(times, pos_v, color='#79c0ff', linewidth=1.2, label='V peak (+)')
-    ax.plot(times, neg_v, color='#ff7b72', linewidth=1.2, label='V peak (−)')
+    hall_v = [d.get('hall_v', None) for d in data]
+    t_hv   = [t for t, v in zip(times, hall_v) if v is not None]
+    v_hv   = [v for v in hall_v if v is not None]
+    if t_hv:
+        ax.plot(t_hv, v_hv, color='#79c0ff', linewidth=1.2, label='Hall V')
+        ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
+                  edgecolor=BORDER, framealpha=0.8)
     ax.set_ylabel('Hall V (V)')
-    ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
-              edgecolor=BORDER, framealpha=0.8)
 
-    # ── Pitch angle (pos + neg peaks) ──
+    # ── Pitch angle ──
     ax = axes[5]
     _style(ax)
     if has_pitch:
-        t_pp = [t for t, v in zip(times, pitch_pos_raw) if v is not None]
-        v_pp = [v for v in pitch_pos_raw if v is not None]
-        t_pn = [t for t, v in zip(times, pitch_neg_raw) if v is not None]
-        v_pn = [v for v in pitch_neg_raw if v is not None]
-        t_pe = [t for t, v in zip(times, pitch_enc_raw) if v is not None]
-        v_pe = [v for v in pitch_enc_raw if v is not None]
-        if t_pp:
-            ax.plot(t_pp, v_pp, color='#79c0ff', linewidth=1.2, label='Pitch (+)')
-        if t_pn:
-            ax.plot(t_pn, v_pn, color='#ff7b72', linewidth=1.2, label='Pitch (−)')
+        t_ph = [t for t, v in zip(times, pitch_hall_raw) if v is not None]
+        v_ph = [v for v in pitch_hall_raw if v is not None]
+        t_pe = [t for t, v in zip(times, pitch_enc_raw)  if v is not None]
+        v_pe = [v for v in pitch_enc_raw  if v is not None]
+        if t_ph:
+            ax.plot(t_ph, v_ph, color='#79c0ff', linewidth=1.5, label='Pitch (hall)')
         if t_pe:
             ax.plot(t_pe, v_pe, color='#56d364', linewidth=1.5, label='Pitch (enc)')
         ax.axhline(0, color=MUTED, linewidth=0.5, linestyle='--')
@@ -659,7 +654,8 @@ def recording_rename():
 @app.route('/api/calibration')
 def get_calibration():
     with _cal_srv_lock:
-        return jsonify({'points': dict(_calibration)})
+        pts = sorted(_calibration.get('hall_pts', []))
+    return jsonify({'points': pts})
 
 
 @app.route('/api/calibration/point', methods=['POST'])
@@ -667,8 +663,28 @@ def add_cal_point():
     data  = request.get_json(force=True)
     pitch = float(data.get('pitch_deg', 0))
 
+    ok = serial_manager.calibrate_hall(pitch)
+    if not ok:
+        return jsonify({'ok': False, 'error': 'hall sensor not connected'}), 503
+
+    with _cal_srv_lock:
+        pts = _calibration.setdefault('hall_pts', [])
+        if pitch not in pts:
+            pts.append(pitch)
+            pts.sort()
+        _save_calibration(_calibration)
+
+    _sse_push({'type': 'calibration_update', 'points': sorted(_calibration.get('hall_pts', []))})
+    return jsonify({'ok': True, 'pitch_deg': pitch})
+
+
+# ── dead code preserved for reference (old voltage-peak based calibration) ──
+def _add_cal_point_legacy():
+    data  = request.get_json(force=True)
+    pitch = float(data.get('pitch_deg', 0))
+
     serial_manager.start_cal_collection()
-    time.sleep(10.0)   # collect 10 s of peaks at steady-state, same as scope.py
+    time.sleep(10.0)
     pos_samples, neg_samples = serial_manager.stop_cal_collection()
 
     missing = []
@@ -696,24 +712,26 @@ def add_cal_point():
 
 @app.route('/api/calibration/point', methods=['DELETE'])
 def del_cal_point():
-    data = request.get_json(force=True)
-    key  = f'{round(float(data.get("pitch_deg", 0)), 2):.2f}'
+    data  = request.get_json(force=True)
+    pitch = float(data.get('pitch_deg', 0))
+    serial_manager.del_hall_cal_point(pitch)
     with _cal_srv_lock:
-        removed = bool(_calibration['positive'].pop(key, None) is not None
-                       or _calibration['negative'].pop(key, None) is not None)
-        if removed:
-            _save_calibration(_calibration)
-    _sse_push({'type': 'calibration_update', 'points': dict(_calibration)})
-    return jsonify({'ok': removed})
+        pts = _calibration.get('hall_pts', [])
+        if pts:
+            closest = min(pts, key=lambda p: abs(p - pitch))
+            pts.remove(closest)
+        _save_calibration(_calibration)
+    _sse_push({'type': 'calibration_update', 'points': sorted(_calibration.get('hall_pts', []))})
+    return jsonify({'ok': True})
 
 
 @app.route('/api/calibration/clear', methods=['POST'])
 def clear_calibration():
+    serial_manager.clear_hall_cal()
     with _cal_srv_lock:
-        _calibration['positive'].clear()
-        _calibration['negative'].clear()
+        _calibration['hall_pts'] = []
         _save_calibration(_calibration)
-    _sse_push({'type': 'calibration_update', 'points': {'positive': {}, 'negative': {}}})
+    _sse_push({'type': 'calibration_update', 'points': []})
     return jsonify({'ok': True})
 
 
@@ -809,49 +827,28 @@ def _streamer():
 
 
 def _recorder():
-    """Poll sensor state, maintain pitch filter, and store rows while recording."""
-    global _pitch_live_pos, _pitch_live_neg
+    """Poll sensor state and store rows while recording."""
     while True:
         with _rec_lock:
             active = _recording
             rate   = _rec_rate
             start  = _rec_start
 
-        st    = serial_manager.get_status()
-        pos_v = st['hall'].get('pos_voltage', 0.0)
-        neg_v = st['hall'].get('neg_voltage', 0.0)
-        enc   = st.get('encoder', {})
-        with _cal_srv_lock:
-            cal = dict(_calibration)
-
-        # Update median filter (always, so live display stays current)
-        raw_pos = _interpolate_pitch(pos_v, 'positive', cal)
-        raw_neg = _interpolate_pitch(neg_v, 'negative', cal)
-        with _pitch_filter_lock:
-            if raw_pos is not None:
-                _pitch_buf_pos.append(raw_pos)
-                _pitch_live_pos = sorted(_pitch_buf_pos)[len(_pitch_buf_pos) // 2]
-            if raw_neg is not None:
-                _pitch_buf_neg.append(raw_neg)
-                _pitch_live_neg = sorted(_pitch_buf_neg)[len(_pitch_buf_neg) // 2]
-            pitch_pos_f = _pitch_live_pos
-            pitch_neg_f = _pitch_live_neg
+        st  = serial_manager.get_status()
+        enc = st.get('encoder', {})
+        hall_pitch = st['hall'].get('pitch_deg')
 
         if active:
             _rec_data.append({
                 'time_s':      round(time.time() - start, 4),
                 'throttle':    st['esc'].get('throttle_raw', 0),
-                'rpm_hall':    st['hall'].get('rpm', 0),
                 'weight_g':    st['loadcell'].get('weight', 0.0),
                 'esc_rpm':     st['esc'].get('rpm', 0),
                 'voltage_v':   st['esc'].get('voltage', 0.0),
                 'current_a':   st['esc'].get('current', 0.0),
                 'temp_c':      st['esc'].get('temp', 0),
                 'mah':         st['esc'].get('mah', 0),
-                'pos_voltage': round(pos_v, 4),
-                'neg_voltage': round(neg_v, 4),
-                'pitch_pos':   round(pitch_pos_f, 2) if pitch_pos_f is not None else '',
-                'pitch_neg':   round(pitch_neg_f, 2) if pitch_neg_f is not None else '',
+                'pitch_hall':  round(hall_pitch, 2) if hall_pitch is not None else '',
                 'enc_deg':     round(enc.get('enc_deg', 0.0), 3),
                 'pitch_enc':   round(enc['pitch_deg'], 3) if enc.get('pitch_deg') is not None else '',
             })

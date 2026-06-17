@@ -514,6 +514,17 @@
           </thead>
           <tbody id="cal-tbody"></tbody>
         </table>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <button class="btn btn-set"
+                  style="flex:1;font-size:11px;padding:6px"
+                  onclick="exportCalCSV()">Export CSV</button>
+          <label class="btn btn-set"
+                 style="flex:1;font-size:11px;padding:6px;cursor:pointer;text-align:center;margin:0">
+            Import CSV
+            <input type="file" id="cal-import-input" accept=".csv"
+                   style="display:none" onchange="importCalCSV(this)">
+          </label>
+        </div>
         <button class="btn btn-disarm"
                 style="width:100%;margin-top:6px;font-size:11px;padding:6px"
                 onclick="clearCalibration()">Clear All</button>
@@ -1567,6 +1578,53 @@ function clearCalibration() {
   fetch('/api/calibration/clear', {method: 'POST'})
     .then(() => { _calPoints = []; _renderCalTable(); })
     .catch(console.error);
+}
+
+function exportCalCSV() {
+  if (!_calPoints.length) { alert('No calibration points to export.'); return; }
+  const rows = ['pitch_deg', ...[..._calPoints].sort((a, b) => a - b).map(p => p.toFixed(2))];
+  const blob = new Blob([rows.join('\n')], {type: 'text/csv'});
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
+  a.download = 'pitch_calibration.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+async function importCalCSV(input) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+
+  const text   = await file.text();
+  const pitches = text.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && l.toLowerCase() !== 'pitch_deg')
+    .map(l => parseFloat(l))
+    .filter(v => !isNaN(v));
+
+  if (!pitches.length) { alert('No valid pitch values found in file.'); return; }
+
+  const status = document.getElementById('cal-status');
+  status.textContent = `Importing ${pitches.length} point(s)…`;
+
+  for (let i = 0; i < pitches.length; i++) {
+    const pitch = pitches[i];
+    try {
+      const r = await fetch('/api/calibration/point', {
+        method:  'POST',
+        headers: {'Content-Type': 'application/json'},
+        body:    JSON.stringify({pitch_deg: pitch})
+      });
+      const d = await r.json();
+      if (!d.ok) { status.textContent = `Error at ${pitch}°: ${d.error}`; return; }
+      status.textContent = `Imported ${i + 1}/${pitches.length}: ${pitch}°`;
+    } catch {
+      status.textContent = `Request failed at ${pitch}°`;
+      return;
+    }
+  }
+  status.textContent = `Import done — ${pitches.length} point(s) loaded`;
 }
 
 // -----------------------------------------------------------------------

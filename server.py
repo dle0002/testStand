@@ -677,7 +677,7 @@ def add_cal_point():
             pts.append(pitch)
             pts.sort()
         if voltage_v is not None:
-            _calibration.setdefault('hall_voltages', {})[str(round(pitch, 2))] = voltage_v
+            _calibration.setdefault('hall_voltages', {})[f"{pitch:.2f}"] = voltage_v
         _save_calibration(_calibration)
 
     _sse_push({'type': 'calibration_update',
@@ -728,7 +728,7 @@ def del_cal_point():
         if pts:
             closest = min(pts, key=lambda p: abs(p - pitch))
             pts.remove(closest)
-            _calibration.get('hall_voltages', {}).pop(str(round(closest, 2)), None)
+            _calibration.get('hall_voltages', {}).pop(f"{closest:.2f}", None)
         _save_calibration(_calibration)
     _sse_push({'type': 'calibration_update',
                'points':   sorted(_calibration.get('hall_pts', [])),

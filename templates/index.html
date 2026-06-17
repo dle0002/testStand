@@ -523,8 +523,6 @@
           <thead>
             <tr>
               <td class="lbl">Pitch °</td>
-              <td class="lbl" style="text-align:right">V (+)</td>
-              <td class="lbl" style="text-align:right">V (−)</td>
               <td></td>
             </tr>
           </thead>
@@ -1096,29 +1094,19 @@ function applyStatus(data) {
   setEl('m-mah',      mah);
   if (h.pos_voltage != null) {
     setEl('m-hall-pos-v', h.pos_voltage.toFixed(3) + ' V');
-    if (_calMode) {
-      const raw = _interpolatePitchNum(h.pos_voltage, 'positive');
-      if (raw !== null) {
-        const filt = _medianFilter(_pitchBufPos, raw, _pitchFilterW);
-        setEl('m-pitch-pos', filt.toFixed(1) + '°');
-        if (_pitchChart) _pitchChart.push(0, filt);
-      } else {
-        setEl('m-pitch-pos', '—°');
-      }
-    }
   }
   if (h.neg_voltage != null) {
     setEl('m-hall-neg-v', h.neg_voltage.toFixed(3) + ' V');
-    if (_calMode) {
-      const raw = _interpolatePitchNum(h.neg_voltage, 'negative');
-      if (raw !== null) {
-        const filt = _medianFilter(_pitchBufNeg, raw, _pitchFilterW);
-        setEl('m-pitch-neg', filt.toFixed(1) + '°');
-        if (_pitchChart) _pitchChart.push(1, filt);
-      } else {
-        setEl('m-pitch-neg', '—°');
-      }
+  }
+  if (_calMode) {
+    if (h.pitch_deg != null) {
+      const filt = _medianFilter(_pitchBufPos, h.pitch_deg, _pitchFilterW);
+      setEl('m-pitch-pos', filt.toFixed(1) + '°');
+      if (_pitchChart) _pitchChart.push(0, filt);
+    } else {
+      setEl('m-pitch-pos', '—°');
     }
+    setEl('m-pitch-neg', '—°');
   }
   if (enc.enc_deg != null) {
     setEl('m-enc-deg', enc.enc_deg.toFixed(1) + '°');
@@ -1196,25 +1184,9 @@ function parseLiveLine(source, line) {
       if (m[1] === '+') {
         _liveHallPosV = v;
         _lv('m-hall-pos-v', v.toFixed(3) + ' V');
-        if (_calMode) {
-          const raw = _interpolatePitchNum(v, 'positive');
-          if (raw !== null) {
-            const filtered = _medianFilter(_pitchBufPos, raw, _pitchFilterW);
-            _lv('m-pitch-pos', filtered.toFixed(1) + '°');
-            if (_pitchChart) _pitchChart.push(0, filtered);
-          }
-        }
       } else {
         _liveHallNegV = v;
         _lv('m-hall-neg-v', v.toFixed(3) + ' V');
-        if (_calMode) {
-          const raw = _interpolatePitchNum(v, 'negative');
-          if (raw !== null) {
-            const filtered = _medianFilter(_pitchBufNeg, raw, _pitchFilterW);
-            _lv('m-pitch-neg', filtered.toFixed(1) + '°');
-            if (_pitchChart) _pitchChart.push(1, filtered);
-          }
-        }
       }
       return;
     }
@@ -1448,7 +1420,7 @@ function connectSSE() {
         document.getElementById('plot-modal').classList.remove('open');
       }
     } else if (data.type === 'calibration_update') {
-      _calPoints = {positive: {}, negative: {}, ...(data.points || {})};
+      _calPoints = Array.isArray(data.points) ? data.points : [];
       _renderCalTable();
     } else if (data.type === 'slowdown') {
       if (data.state === 'running') {
@@ -1506,7 +1478,7 @@ function connectSSE() {
 // Pitch calibration
 // -----------------------------------------------------------------------
 let _calMode      = false;
-let _calPoints    = {positive: {}, negative: {}};
+let _calPoints    = [];
 let _liveHallPosV = null;
 let _liveHallNegV = null;
 
@@ -1551,21 +1523,14 @@ function toggleCalMode() {
 }
 
 function _renderCalTable() {
-  const tbody  = document.getElementById('cal-tbody');
+  const tbody = document.getElementById('cal-tbody');
   tbody.innerHTML = '';
-  const posMap = _calPoints.positive || {};
-  const negMap = _calPoints.negative || {};
-  const keys   = [...new Set([...Object.keys(posMap), ...Object.keys(negMap)])]
-    .sort((a, b) => parseFloat(a) - parseFloat(b));
-  for (const key of keys) {
-    const posV = posMap[key] != null ? parseFloat(posMap[key]).toFixed(3) : '—';
-    const negV = negMap[key] != null ? parseFloat(negMap[key]).toFixed(3) : '—';
+  const pts = [..._calPoints].sort((a, b) => a - b);
+  for (const p of pts) {
     const tr = document.createElement('tr');
     tr.innerHTML =
-      `<td class="lbl">${parseFloat(key).toFixed(1)}°</td>` +
-      `<td class="val" style="font-size:12px;text-align:right">${posV}</td>` +
-      `<td class="val" style="font-size:12px;text-align:right">${negV}</td>` +
-      `<td style="text-align:right"><button class="log-clear" onclick="deleteCalPoint(${key})">&#x2715;</button></td>`;
+      `<td class="lbl">${parseFloat(p).toFixed(1)}°</td>` +
+      `<td style="text-align:right"><button class="log-clear" onclick="deleteCalPoint(${p})">&#x2715;</button></td>`;
     tbody.appendChild(tr);
   }
 }
@@ -1609,12 +1574,7 @@ function confirmCalPoint() {
     .then(d => {
       clearInterval(timer);
       if (d.ok) {
-        status.textContent =
-          `${pitch}°: V(+)=${d.avg_pos_voltage.toFixed(3)} (${d.n_pos} pts), V(−)=${d.avg_neg_voltage.toFixed(3)} (${d.n_neg} pts)`;
-        const key = parseFloat(pitch).toFixed(2);
-        _calPoints.positive[key] = d.avg_pos_voltage;
-        _calPoints.negative[key] = d.avg_neg_voltage;
-        _renderCalTable();
+        status.textContent = `${d.pitch_deg}° recorded`;
       } else {
         status.textContent = d.error || 'Failed';
       }
@@ -1633,9 +1593,7 @@ function deleteCalPoint(pitch) {
     body:    JSON.stringify({pitch_deg: pitch})
   })
     .then(() => {
-      const key = parseFloat(pitch).toFixed(2);
-      delete _calPoints.positive[key];
-      delete _calPoints.negative[key];
+      _calPoints = _calPoints.filter(p => Math.abs(p - parseFloat(pitch)) > 0.01);
       _renderCalTable();
     })
     .catch(console.error);
@@ -1644,7 +1602,7 @@ function deleteCalPoint(pitch) {
 function clearCalibration() {
   if (!confirm('Clear all calibration points?')) return;
   fetch('/api/calibration/clear', {method: 'POST'})
-    .then(() => { _calPoints = {positive: {}, negative: {}}; _renderCalTable(); })
+    .then(() => { _calPoints = []; _renderCalTable(); })
     .catch(console.error);
 }
 
@@ -1783,8 +1741,7 @@ fetch('/api/status').then(r => r.json()).then(applyStatus).catch(() => {});
 fetch('/api/calibration')
   .then(r => r.json())
   .then(d => {
-    const p = d.points || {};
-    _calPoints = {positive: p.positive || {}, negative: p.negative || {}};
+    _calPoints = Array.isArray(d.points) ? d.points : [];
     _renderCalTable();
   })
   .catch(() => {});

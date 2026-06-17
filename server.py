@@ -224,7 +224,7 @@ def _generate_plot(data: list[dict], path: str):
     ax = axes[0]
     _style(ax)
     ax.plot(times, rpm_esc,  color='#f0883e', linewidth=1.5, label='ESC RPM')
-    ax.plot(times, [t * (max(rpm_esc) or 1) / 1047 for t in throttle],
+    ax.plot(times, [t * (max(rpm_esc) or 1) / 2047 for t in throttle],
             color='#58a6ff', linewidth=1, linestyle=':', alpha=0.6, label='Throttle (scaled)')
     ax.set_ylabel('RPM')
     ax.legend(loc='upper left', fontsize=8, facecolor=SURF, labelcolor=TEXT,
@@ -333,7 +333,7 @@ def set_rpm_target():
 @app.route('/api/motor/speed', methods=['POST'])
 def set_speed():
     data = request.get_json(force=True)
-    speed = max(0, min(1047, int(data.get('speed', 0))))
+    speed = max(0, min(2047, int(data.get('speed', 0))))
     serial_manager.set_motor_speed(speed)
     return jsonify({'ok': True, 'speed': speed})
 

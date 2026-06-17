@@ -320,10 +320,10 @@
         <div id="throttle-section">
           <div class="speed-display" id="disp-speed">0</div>
           <div class="speed-pct">DShot throttle</div>
-          <input type="range" id="slider" min="0" max="1047" value="0" step="1"
+          <input type="range" id="slider" min="0" max="2047" value="0" step="1"
                  oninput="onSlider(this.value)" style="--pct:0%">
           <div class="speed-row">
-            <input type="number" id="num-speed" min="0" max="1047" value="0"
+            <input type="number" id="num-speed" min="0" max="2047" value="0"
                    onchange="onNumChange(this.value)">
             <button class="btn btn-set" onclick="applySpeed()">SET</button>
           </div>
@@ -810,7 +810,7 @@ function closePlotModal() {
 // -----------------------------------------------------------------------
 function onSlider(v) {
   v = parseInt(v);
-  const pct = Math.round(v / 1047 * 100);
+  const pct = Math.round(v / 2047 * 100);
   document.getElementById('num-speed').value = v;
   document.getElementById('disp-speed').textContent = v;
   document.getElementById('slider').style.setProperty('--pct', pct + '%');
@@ -821,7 +821,7 @@ function onSlider(v) {
 }
 
 function onNumChange(v) {
-  v = Math.max(0, Math.min(1047, parseInt(v) || 0));
+  v = Math.max(0, Math.min(2047, parseInt(v) || 0));
   document.getElementById('slider').value = v;
   onSlider(v);
 }

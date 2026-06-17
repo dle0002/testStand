@@ -509,6 +509,7 @@
           <thead>
             <tr>
               <td class="lbl">Pitch °</td>
+              <td class="lbl" style="text-align:right">V</td>
               <td></td>
             </tr>
           </thead>
@@ -1417,7 +1418,8 @@ function connectSSE() {
         document.getElementById('plot-modal').classList.remove('open');
       }
     } else if (data.type === 'calibration_update') {
-      _calPoints = Array.isArray(data.points) ? data.points : [];
+      _calPoints   = Array.isArray(data.points) ? data.points : [];
+      _calVoltages = data.voltages || {};
       _renderCalTable();
     } else if (data.type === 'slowdown') {
       if (data.state === 'running') {
@@ -1476,6 +1478,7 @@ function connectSSE() {
 // -----------------------------------------------------------------------
 let _calMode      = false;
 let _calPoints    = [];
+let _calVoltages  = {};   // pitch_deg (string key, 2dp) → voltage_v
 let _liveHallPosV = null;
 let _liveHallNegV = null;
 
@@ -1525,8 +1528,11 @@ function _renderCalTable() {
   const pts = [..._calPoints].sort((a, b) => a - b);
   for (const p of pts) {
     const tr = document.createElement('tr');
+    const vKey = parseFloat(p).toFixed(2);
+    const vStr = _calVoltages[vKey] != null ? parseFloat(_calVoltages[vKey]).toFixed(3) : '—';
     tr.innerHTML =
       `<td class="lbl">${parseFloat(p).toFixed(1)}°</td>` +
+      `<td class="val" style="font-size:12px;text-align:right">${vStr}</td>` +
       `<td style="text-align:right"><button class="log-clear" onclick="deleteCalPoint(${p})">&#x2715;</button></td>`;
     tbody.appendChild(tr);
   }
@@ -1568,6 +1574,7 @@ function deleteCalPoint(pitch) {
   })
     .then(() => {
       _calPoints = _calPoints.filter(p => Math.abs(p - parseFloat(pitch)) > 0.01);
+      delete _calVoltages[parseFloat(pitch).toFixed(2)];
       _renderCalTable();
     })
     .catch(console.error);
@@ -1576,13 +1583,17 @@ function deleteCalPoint(pitch) {
 function clearCalibration() {
   if (!confirm('Clear all calibration points?')) return;
   fetch('/api/calibration/clear', {method: 'POST'})
-    .then(() => { _calPoints = []; _renderCalTable(); })
+    .then(() => { _calPoints = []; _calVoltages = {}; _renderCalTable(); })
     .catch(console.error);
 }
 
 function exportCalCSV() {
   if (!_calPoints.length) { alert('No calibration points to export.'); return; }
-  const rows = ['pitch_deg', ...[..._calPoints].sort((a, b) => a - b).map(p => p.toFixed(2))];
+  const sorted = [..._calPoints].sort((a, b) => a - b);
+  const rows = ['pitch_deg,voltage_v', ...sorted.map(p => {
+    const v = _calVoltages[p.toFixed(2)];
+    return `${p.toFixed(2)},${v != null ? parseFloat(v).toFixed(4) : ''}`;
+  })];
   const blob = new Blob([rows.join('\n')], {type: 'text/csv'});
   const a    = document.createElement('a');
   a.href     = URL.createObjectURL(blob);
@@ -1762,7 +1773,8 @@ fetch('/api/status').then(r => r.json()).then(applyStatus).catch(() => {});
 fetch('/api/calibration')
   .then(r => r.json())
   .then(d => {
-    _calPoints = Array.isArray(d.points) ? d.points : [];
+    _calPoints   = Array.isArray(d.points) ? d.points : [];
+    _calVoltages = d.voltages || {};
     _renderCalTable();
   })
   .catch(() => {});

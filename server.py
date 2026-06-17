@@ -654,8 +654,9 @@ def recording_rename():
 @app.route('/api/calibration')
 def get_calibration():
     with _cal_srv_lock:
-        pts = sorted(_calibration.get('hall_pts', []))
-    return jsonify({'points': pts})
+        pts      = sorted(_calibration.get('hall_pts', []))
+        voltages = dict(_calibration.get('hall_voltages', {}))
+    return jsonify({'points': pts, 'voltages': voltages})
 
 
 @app.route('/api/calibration/point', methods=['POST'])
@@ -667,15 +668,22 @@ def add_cal_point():
     if not ok:
         return jsonify({'ok': False, 'error': 'hall sensor not connected'}), 503
 
+    time.sleep(0.15)  # wait for Pico's OK CAL response to arrive
+    voltage_v = serial_manager.get_cal_voltages().get(round(pitch, 2))
+
     with _cal_srv_lock:
         pts = _calibration.setdefault('hall_pts', [])
         if pitch not in pts:
             pts.append(pitch)
             pts.sort()
+        if voltage_v is not None:
+            _calibration.setdefault('hall_voltages', {})[str(round(pitch, 2))] = voltage_v
         _save_calibration(_calibration)
 
-    _sse_push({'type': 'calibration_update', 'points': sorted(_calibration.get('hall_pts', []))})
-    return jsonify({'ok': True, 'pitch_deg': pitch})
+    _sse_push({'type': 'calibration_update',
+               'points':   sorted(_calibration.get('hall_pts', [])),
+               'voltages': _calibration.get('hall_voltages', {})})
+    return jsonify({'ok': True, 'pitch_deg': pitch, 'voltage_v': voltage_v})
 
 
 # ── dead code preserved for reference (old voltage-peak based calibration) ──
@@ -720,8 +728,11 @@ def del_cal_point():
         if pts:
             closest = min(pts, key=lambda p: abs(p - pitch))
             pts.remove(closest)
+            _calibration.get('hall_voltages', {}).pop(str(round(closest, 2)), None)
         _save_calibration(_calibration)
-    _sse_push({'type': 'calibration_update', 'points': sorted(_calibration.get('hall_pts', []))})
+    _sse_push({'type': 'calibration_update',
+               'points':   sorted(_calibration.get('hall_pts', [])),
+               'voltages': _calibration.get('hall_voltages', {})})
     return jsonify({'ok': True})
 
 
@@ -729,9 +740,10 @@ def del_cal_point():
 def clear_calibration():
     serial_manager.clear_hall_cal()
     with _cal_srv_lock:
-        _calibration['hall_pts'] = []
+        _calibration['hall_pts']      = []
+        _calibration['hall_voltages'] = {}
         _save_calibration(_calibration)
-    _sse_push({'type': 'calibration_update', 'points': []})
+    _sse_push({'type': 'calibration_update', 'points': [], 'voltages': {}})
     return jsonify({'ok': True})
 
 

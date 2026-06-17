@@ -61,13 +61,15 @@ _ESC_RE       = re.compile(
 _ENCODER_RE   = re.compile(
     r'raw:\s*(\d+)\s*\|\s*enc:\s*([\d.]+)\s*deg\s*\|\s*pitch:\s*(INVALID|-?[\d.]+)'
 )
-_HALL_PITCH_RE = re.compile(
+_HALL_PITCH_RE  = re.compile(
     r'\[\s*\d+ms\]\s+pitch:\s*(-?[\d.]+)\s+raw:\s*(\d+)\s+V:\s*([\d.]+)'
 )
+_HALL_OK_CAL_RE = re.compile(r'OK CAL.*?V=([\d.]+).*?deg=(-?[\d.]+)')
 
 _cal_active      = False
 _cal_samples_pos: list = []
 _cal_samples_neg: list = []
+_hal_cal_voltages: dict = {}   # pitch_deg (rounded to 2dp) → voltage_v, from OK CAL responses
 
 _state: dict = {
     'hall': {
@@ -336,6 +338,11 @@ def _read_loop(source: str, ser: serial.Serial):
                             _state['hall']['pitch_deg'] = None
                             _state['hall']['raw']       = int(m2.group(1))
                             _state['hall']['voltage']   = float(m2.group(2))
+                else:
+                    m3 = _HALL_OK_CAL_RE.search(line)
+                    if m3:
+                        key = round(float(m3.group(2)), 2)
+                        _hal_cal_voltages[key] = round(float(m3.group(1)), 4)
 
         except serial.SerialException:
             with _lock:
@@ -613,6 +620,11 @@ def calibrate_hall(pitch_deg: float) -> bool:
         return False
     _write(ser, f"CAL:{pitch_deg:.2f}")
     return True
+
+
+def get_cal_voltages() -> dict:
+    """Return a copy of the pitch → voltage_v map populated from OK CAL responses."""
+    return dict(_hal_cal_voltages)
 
 
 def del_hall_cal_point(pitch_deg: float) -> bool:

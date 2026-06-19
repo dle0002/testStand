@@ -5,8 +5,8 @@ Serial manager — connects to the 3 USB microcontrollers:
   esc       ESP32      esc_handler firmware  (DShot300 + KISS telemetry)
 
 ESC throttle range:
-  0       → DISARM
-  47-1047 → T:47 … T:1047  (THR_MIN=47, THR_MAX=1047)
+  0        → DISARM
+  47-2047  → T:47 … T:2047  (THR_MIN=47, THR_MAX=2047)
 
 Port assignment: set HALL_PORT / LOADCELL_PORT / ESC_PORT explicitly, or
 leave all as None to use auto-detection (reads startup banners).
@@ -31,7 +31,7 @@ BAUD          = 115200
 
 # ESC DShot throttle range
 _ESC_THR_MIN = 47
-_ESC_THR_MAX = 1047
+_ESC_THR_MAX = 2047
 
 # -----------------------------------------------------------------------
 # Hall sensor DSP constants — identical to scope.py so calibration domains match

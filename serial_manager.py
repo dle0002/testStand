@@ -23,9 +23,9 @@ import serial
 import serial.tools.list_ports
 
 # --- Port config -------------------------------------------------------
-HALL_PORT     = None   # e.g. '/dev/ttyACM0'
-LOADCELL_PORT = None   # e.g. '/dev/ttyACM1'
-ESC_PORT      = None   # e.g. '/dev/ttyACM2'
+HALL_PORT     = '/dev/serial/by-id/usb-Arduino_RaspberryPi_Pico_F29860E63632639B-if00'
+LOADCELL_PORT = '/dev/serial/by-id/usb-Silicon_Labs_CP2104_USB_to_UART_Bridge_Controller_02123B3E-if00-port0'
+ESC_PORT      = '/dev/serial/by-id/usb-Silicon_Labs_CP2104_USB_to_UART_Bridge_Controller_02221FA5-if00-port0'
 ENCODER_PORT  = None   # e.g. '/dev/ttyACM3'  AS5600 magnetic encoder
 BAUD          = 115200
 

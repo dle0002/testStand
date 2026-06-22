@@ -1165,7 +1165,8 @@ function applyStatus(data) {
 // Live metric parsing from log lines
 // (updates cards immediately as lines arrive, independent of status poll)
 // -----------------------------------------------------------------------
-const _HALL_RE     = /POL:([+-]) V:(-?[\d.]+) RPM:(\d+)/;
+const _HALL_RE          = /POL:([+-]) V:(-?[\d.]+) RPM:(\d+)/;
+const _HALL_PITCH_LOG_RE = /\[\s*\d+ms\]\s+pitch:\s*(-?[\d.]+)/;
 const _RPM_ZERO_RE = /RPM:0/;
 const _LC_RE       = /\[(\d+)ms\]\s+([\d.\-]+)g\s+\(raw:\s*([\d\-]+)\)/;
 const _ESC_RE      = /\[(\d+)ms\] THR:\s*(\d+)\s+RPM:\s*(\d+)\s+([\d.]+)V\s+([\d.]+)A\s+(\d+).C\s+(\d+)mAh/;
@@ -1191,6 +1192,11 @@ function parseLiveLine(source, line) {
     if (_RPM_ZERO_RE.test(line)) {
       _lv('m-rpm',   '0');
       _lv('bar-rpm', '0');
+    }
+    const mp = _HALL_PITCH_LOG_RE.exec(line);
+    if (mp && _pitchChart) {
+      const filt = _medianFilter(_pitchBufPos, parseFloat(mp[1]), _pitchFilterW);
+      _pitchChart.push(0, filt);
     }
   } else if (source === 'loadcell') {
     const m = _LC_RE.exec(line);
